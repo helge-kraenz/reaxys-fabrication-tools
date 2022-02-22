@@ -1,0 +1,4 @@
+./bin/clean-path
+./bin/create-archive
+./MANIFEST-tools
+./setup.sh

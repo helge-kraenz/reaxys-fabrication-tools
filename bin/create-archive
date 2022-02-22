@@ -1,0 +1,220 @@
+#!/usr/bin/perl
+
+use strict;
+use 5.010;
+use Pod::Usage;
+use Getopt::Long;
+use File::Spec::Functions qw( :ALL );
+
+my $S3 = "s3://nameservice/patches/export";
+my $XS3 = "s3://nameservice/releases/";
+
+my $Man    = undef;
+my $Help   = undef;
+my $Print  = undef;
+my $Aws    = 1;
+my $Delete = 1;
+my $Jira   = 1;
+my $Only   = 0;
+my $Exchange = undef;
+my $TempDir = tmpdir;
+my $Single = undef;
+my $Ziel = undef;
+
+chomp( my $Date  = `date -Iseconds| cut -d + -f 1 | sed -e "s+[T:]+-+g"` );
+
+my $ParseResult = GetOptions( "aws!" => \$Aws , "date=s" => \$Date , "delete!" => \$Delete , "help|?" => \$Help , "jira!" => \$Jira , "man" => \$Man , "only" => \$Only , "print" => \$Print , "single" => \$Single , "tempdir=s" => \$TempDir , "xchange" => \$Exchange , "ziel=s" => \$Ziel );
+pod2usage( 1 ) if ! $ParseResult;
+
+pod2usage( 1 ) if $Help;
+pod2usage( -verbose => 2 ) if $Man;
+
+
+my @Issues = @ARGV;
+pod2usage( "$0: No issue given." ) if ! @Issues;
+
+if( $Exchange )
+{
+  $Aws = 1;
+  $Jira = 0;
+}
+
+if( $Only )
+{
+  $TempDir = "." if ! $TempDir;
+  $Delete = 0;
+  $Aws = 0;
+  $Jira = 0;
+}
+
+if( $Single || $Ziel )
+{
+  $Aws = 1;
+  $Jira = 0;
+}
+
+for my $Issue ( @ARGV )
+{
+  my $Manifest = ( -s $Issue ) ? $Issue : "MANIFEST-$Issue";
+  $Issue =~ s{^MANIFEST-}{};
+  pod2usage( "$0: File $Manifest not found." ) if ! -s $Manifest;
+
+  my $Tar = catfile( $TempDir , lc "$Issue-$Date.tgz" );
+
+  my $Command = "tar czhf $Tar -P -T $Manifest";
+  if( $Print )
+  {
+    print "$Command\n";
+  }
+  else
+  {
+    my $Return = system( $Command );
+    if( $Return != 0 )
+    {
+      print "$Command '$Command' failed: $?\n";
+      exit 1;
+    }
+    print "Archive '$Tar' created.\n";
+  }
+
+  if( $Aws )
+  {
+    my $SmallIssue = lc $Issue;
+    my $Target = "$S3/$SmallIssue/";
+       $Target = "$XS3/$SmallIssue/" if $Exchange;
+       $Target = "$XS3/$Date/" if $Single;
+       $Target = "$Ziel/$Date/" if $Ziel;
+    $Command = "aws s3 cp $Tar $Target";
+    if( $Print )
+    {
+      print "$Command\n";
+    }
+    else
+    {
+      my $Return = system( $Command );
+      if( $Return != 0 )
+      {
+        print "$Command '$Command' failed: $?\n";
+      }
+      else
+      {
+        print "Archive '$Tar' uploaded to $Target.\n";
+      }
+      
+    }
+  }
+  if( $Jira )
+  {
+    my $LargeIssue = uc $Issue;
+    #use JIRA::REST;
+    #my $jira = JIRA::REST->new({ url => 'https://jira.elsevier.com' });
+    #$jira->attach_files($LargeIssue,$Tar);
+
+    print "Archive '$Tar' attached to '$LargeIssue'.\n";
+
+  }
+  if( $Delete )
+  {
+    if( unlink( $Tar ) )
+    {
+      print "Archive '$Tar' deleted.\n";
+    }
+    else
+    {
+      print "Archive '$Tar' could not be deleted.\n";
+    }
+  }
+  else
+  {
+    print "Archive '$Tar' was not deleted.\n";
+  }
+}
+exit 0;
+
+__END__
+
+=head1 NAME
+
+ create-archive.pl - Create an archive of files required updating current
+ installation for a certain Jira issue.
+
+=head1 SYNOPSIS
+
+ create-archive.pl [options] <issue-name>
+
+ Options:
+  -aws             upload to AWS
+  -delete          delete temporary archives
+  -date date       use given date
+  -help            brief help message
+  -jira            attach to given Jira issue
+  -man             manual page
+  -only            create archives only
+  -print           print command only
+  -single          use different AWS target directory structure
+  -tempdir dir     temporary directory
+  -xchange         use different AWS target directory structure
+
+=head1 OPTIONS
+
+=over 8
+
+=item B<-aws>
+
+Uploads the generated archives to aws. Defaultis to true.
+Target is "s3://nameservice/patches/export".
+
+=item B<-date>
+
+Gives an explicit date to be used in archives file name. Defaults to current date in format
+"YYYY-MM-DD-HH24-MI-SS". Can be any other string as well as long as it does not contain a space.
+
+=item B<-delete>
+
+Deletes the temporary archives after successful upload. Defaults to true.
+
+=item B<-help>
+
+Prints short help and quits.
+
+=item B<-jira>
+
+Attaches the archives to a given Jira issue. CURRENTLY NOT SUPPORTED.
+
+=item B<-man>
+
+Prints the manual page and exits.
+
+=item B<-only>
+
+Creation of archives only, no upload. Those are created in current directory if no other
+is given explicitely. Equivalent to "--noaws --nodelete --nojira --tempdir .".
+
+=item B<-print>
+
+Prints the commands only and does not execute them.
+
+=item B<-single>
+
+Upload to AWS only, all files are stored in one folder. The folder name includes the date.
+
+=item B<-tempdir dir>
+
+Defines the temporary directory.
+
+=item B<-xchange>
+
+Upload to AWS only, all files are stored in one folder. The folder name includes the issue.
+
+=back
+
+=head1 DESCRIPTION
+
+ B<This program> requires a name of a jira ticket (ISSUE) as input.
+ It will search for a manifestation file called "MANIFEST-ISSUE". This
+ file is supposed to hold all files htat are new or have been changed.
+ It creates a tar.gz file in current directory containing all files
+ in the manifestation file.
+
+=cut
+

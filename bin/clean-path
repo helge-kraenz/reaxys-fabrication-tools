@@ -1,0 +1,70 @@
+#!/usr/bin/perl -w
+
+# Header {{{
+#==============================================================#
+#==============================================================#
+#
+# Version: 1.0.0
+# Updated: 2021-06-10
+# Author: Helge Kraenz
+#
+# History
+# 1.0.0   Initial    kraenzh
+#
+#==============================================================#
+#==============================================================#
+
+#==============================================================#
+# The source and the computer programming technology embodied
+# herein constitute commercially valuable trade secrets and
+# copyrighted material of Elsevier Information Systems GmbH
+# and its licensors. You are not permitted to copy or disclose
+# or allow to be disclosed any data or information with respect
+# to this source or the computer programming technology
+# embodied herein, or any documentation, drawings,
+# descriptions, models, reports or other media relating hereto
+# except as permitted in writing by Elsevier Information
+# Systems GmbH.
+#==============================================================#
+# Header }}}
+
+# Modules and pragmas {{{
+use strict;
+use warnings;
+use File::Basename;
+use File::Spec::Functions qw( :ALL );
+use Getopt::Long;
+use Data::Dumper;
+use Pod::Usage;
+use Carp;
+use Cwd  qw( abs_path );
+# Modules and pragmas }}}
+
+# Get pat and separator from command line {{{
+my $Path = shift;
+my $Sep  = shift || ":";
+# Get pat and separator from command line }}}
+
+# Split path and clear output path {{{
+exit if ! $Path;
+my @In = split( /$Sep/ , $Path );
+my @Out = ();
+# Split path and clear output path }}}
+
+# Check each part {{{
+for my $In ( @In )
+{
+  # Do not add paths which are not already present
+  next if grep{ m{^$In$} } @Out;
+
+  # Add only directories to output. If files or other types have
+  # to be supported as well, comment out this line. The main purpose is anyway 
+  # to ensure that no superfluous stuff is included.
+  next if -d ! $In;
+
+  push( @Out , $In );
+}
+# Check each part }}}
+
+print join( $Sep , @Out );
+
