@@ -1,0 +1,238 @@
+#!/usr/bin/perl
+
+# Modules {{{
+use strict;
+use Getopt::Long;
+use File::Basename;
+use Time::HiRes qw( time );
+use Digest::MD5;
+use Digest::SHA1;
+use Pod::Usage;
+# Modules }}}
+
+# Variables {{{
+my @Files = ();
+my $Server = "artifactory.cm-elsevier.com";
+my $BasePath = "artifactory";
+my $TargetPath = undef;
+my $Version = undef;
+my $LogLevel = 2;
+my $Help = undef;
+my $Man = undef;
+my $Dry = undef;
+my $Unchanged = undef;
+# Variables }}}
+
+# Parse command line {{{
+GetOptions
+(
+  "base=s" => \$BasePath,
+  "dry!" => \$Dry,
+  "file=s" => \@Files,
+  "loglevel=s" => \$LogLevel,
+  "server=s" => \$Server,
+  "target=s" => \$TargetPath,
+  "version=s" => \$Version,
+  "help" => \$Help,
+  "man" => \$Man,
+  "unchanged!" => \$Unchanged,
+);
+# Parse command line }}}
+
+pod2usage(1) if $Help;
+pod2usage(-verbose => 2) if $Man;
+
+# Verify parameters {{{
+my $err = 0;
+foreach ( @Files )
+{
+  if( ! -e )
+  {
+    err( "$_ does not exist." );
+    $err++;
+  }
+}
+if( ! $TargetPath )
+{
+  err( "Target path not given." );
+  $err++;
+}
+if( ! $Version )
+{
+  err( "Version not given." );
+  $err++;
+}
+if( ! $Server )
+{
+  err( "Server not given." );
+  $err++;
+}
+if( $err != 0 )
+{
+  err( "Error in parametrization." );
+  exit( 1 );
+}
+# Verify parameters }}}
+
+# Dump parameters {{{
+outln( 2 , "File: $_" ) foreach ( @Files );
+outln( 2 , "Server: $Server" );
+outln( 2 , "BasePath: $BasePath" );
+outln( 2 , "LogLevel: $LogLevel" );
+outln( 2 , "TargetPath: $TargetPath" );
+outln( 2 , "Version: $Version" );
+# Dump parameters }}}
+
+# Calculate other parameters {{{
+( my $DVersion = $Version ) =~ s{[._]}{-}g;
+my $BaseUrl = "https://$Server/" . ( $BasePath ? "$BasePath/" : "" ) . "$TargetPath/version-$DVersion";
+outln( 1 , "Uploading to $BaseUrl" );
+# Calculate other parameters }}}
+
+# Loop over each file {{{
+for my $File ( sort{ (-s $a) <=> (-s $b) } @Files )
+{
+  my $tf0 = trace( "Start handling of $File" );
+  my( $fs, $di, $su ) = fileparse( $File , qr/\.[^.]*/ );
+  $fs =~ s{_.*}{};
+
+  my $Url = "$BaseUrl/$fs-$DVersion" . ( $su || "");
+
+  if( $Unchanged )
+  {
+    $Url = "$BaseUrl/$File";
+  }
+
+  my $t0 = trace( "Calculating MD5 Start" );
+  open(FILE, $File) or die "Can’t open ’$File’: $!";
+  binmode(FILE);
+  my $md5 = Digest::MD5->new->addfile( *FILE )->hexdigest;
+  close(FILE);
+  trace( "Calculating MD5 End" , $t0);
+  trace( "MD5 sum is: $md5" );
+
+  my $t0 = trace( "Calculating SHA1 Start" );
+  open(FILE, $File) or die "Can’t open ’$File’: $!";
+  binmode(FILE);
+  my $sha1 = Digest::SHA1->new->addfile( *FILE )->hexdigest;
+  close(FILE);
+  trace( "Calculating SHA1 End" , $t0);
+  trace( "SHA1 sum is: $sha1" );
+
+  my $t0 = trace( "Upload Start" );
+  outln( 1 , "Uploading $File to $Url" );
+  my $Curl = qq{curl -# -n -g --insecure -X PUT -H"X-Checksum-Md5:$md5" -H"X-Checksum-Sha1:$sha1" --upload-file $File $Url};
+  trace( "Command: $Curl" );
+  if( ! $Dry )
+  {
+    my $R = system( $Curl );
+    if( $R != 0 )
+    {
+      err( "Command '$Curl' returned exit code $R, terminating upload." );
+      exit 2;
+    }
+  }
+  my $t1 = trace( "Upload End" , $t0 );
+
+  outln( 1 , "Upload finished, elapsed time " . sprintf( "%.4f" , $t1-$t0 ) );
+
+  trace( "End handling of $File" , $tf0 );
+  
+}
+# Loop over each file }}}
+
+exit;
+
+# err {{{
+sub err
+{
+  outln( 0 , shift );
+}
+# err }}}
+
+# trace {{{
+sub trace
+{
+  my( $m , $t ) = @_;
+
+  my $t0 = time;
+  my $e = sprintf "%.4f" , ($t ? $t0 - $t : 0);
+
+  outln( 4 , "TRACE:$t0:$e:$m" );
+
+  $t0;
+}
+# trace }}}
+
+# outln {{{
+sub outln
+{
+  my( $l , $m ) = @_;
+  $m = "$m\n" if $m !~ /\n$/ms;
+  _dump( \*STDOUT , $m ) if( $l <= $LogLevel );
+}
+# outln }}}
+
+# _dump {{{
+sub _dump
+{
+  my( $f , $m ) = @_;
+
+  print $f $m;
+}
+# _dump }}}
+
+__END__
+
+=head1 NAME
+
+to-arti.pl - uploads files to artifactory including the correct checksums. Creates artifactory directories if needed.
+
+=head1 SYNOPSIS
+
+sample [options] [file ...]
+
+ Options:
+   -base=s          artifactory base path, defaults to artifactory
+   -file=s          The name of the file to upload. May be multiple
+   -loglevel=i      The log level, defaults to 2
+   -server=s        The server name, defaults to artifactory.cm-elsevier.com
+   -target=s        The target path name. Required.
+   -version=s       The version of the package. Required.
+   -help            brief help message
+   -man             full documentation
+
+=head1 OPTIONS
+
+=over 8
+
+=item B<-help>
+
+Print a brief help message and exits.
+
+=item B<-man>
+
+Prints the manual page and exits.
+
+=back
+
+=head1 DESCRIPTION
+
+The job
+
+=over 8
+
+$ to-arti.pl -s artifactory.cm-elsevier.com -b artifactory -t reaxys-local/fabrication/reaxys-main -v 4.299.1 -f /data01/production/save/reaxys_4_297_p1.zip -f home_4_294_1.zip
+
+=back
+
+uploads both files to artifactory. The target URL for /data01/production/save/reaxys_4_297_p1.zip
+will be https://artifactory.cm-elsevier.com/artifactory/reaxys-local/fabrication/reaxys-main/version-4-299-1/reaxys-4-299-1.zip.
+The target URL for home_4_294_1.zip
+will be https://artifactory.cm-elsevier.com/artifactory/reaxys-local/fabrication/reaxys-main/version-4-299-1/home-4-299-1.zip.
+
+
+
+
+=cut
+

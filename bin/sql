@@ -1,0 +1,288 @@
+#!/usr/bin/perl -w
+
+use DBI;
+use strict;
+use Getopt::Long;
+use Carp;
+use Time::HiRes qw( gettimeofday tv_interval );
+use File::Glob ':glob';
+
+my $Sql = undef;
+my $Delimiter = " ";
+my $ODelimiter = undef;
+my $Number = -1;
+my $Quotes = undef;
+my $List = undef;
+my $Test = 0;
+my $Verbose = 0;
+my $Dbh;
+my $Input = ( @ARGV  ? "argv" : "stdin" );
+my $Single = undef;
+my $SqlStringFile = undef;
+my $Config = "default";
+my $SqlFile = undef;
+my $Explain = undef;
+my $Showcs = undef;
+
+GetOptions(
+  "Config=s" => \$Config ,
+  "Delimiter=s" => \$ODelimiter ,
+  "Explain" => \$Explain ,
+  "File=s" => \$SqlStringFile ,
+  "H" => \$Showcs ,
+  "List=s" => \$List ,
+  "Number=i" => \$Number ,
+  "Quotes=s" => \$Quotes ,
+  "Resource=s" => \$SqlFile,
+  "Single" => \$Single ,
+  "Test!" => \$Test ,
+  "Verbose!" => \$Verbose ,
+);
+
+# Set input file
+$Input = "file" if $SqlStringFile;
+
+# Read in configuration
+if( ! $SqlFile )
+{
+  $SqlFile = "./.sql";
+  ( $SqlFile ) = File::Glob::glob( '~/.hk/.sql' , GLOB_TILDE | GLOB_ERR ) if( ! -e $SqlFile );
+}
+
+my( $Type , $User , $Password , $Database , $Host , $Port );
+open( F , $SqlFile ) or croak( "$SqlFile: $!\n" );
+while( <F> )
+{
+  chomp;
+  my( $RConfig , $RConnectstring ) = m/^\s*(\S+)\s*(\S.*)$/;
+  if( $Showcs )
+  {
+    print "$RConfig\n";
+  }
+  next if( $RConfig ne $Config );
+  ( $Type , $User , $Password , $Database , $Host , $Port ) = ( $RConnectstring =~ m/^(\S+?)\s+(\S+?)\s+(\S+?)\s+(\S+?)(?:$|\s+(\S+)\s+(\S+)\s*$)/ );
+}
+close( F ) or croak( "$SqlFile: $!\n" );
+exit if $Showcs;
+
+#my $Dsn = ( ( $Host && $Port ) ? "dbi:Proxy:hostname=$Host;port=$Port;dsn=dbi:Oracle:$Database" : "dbi:Oracle:$Database" );
+#my $Dsn = ( ( $Host && $Port ) ? "dbi:Proxy:hostname=$Host;port=$Port;dsn=dbi:Pg:$Database" : "dbi:Pg:$Database" );
+my $dbident = undef;
+$dbident = "dbname" if $Type eq "Pg";
+$dbident = "sid" if $Type eq "Oracle";
+my $Dsn = "dbi:$Type:host=$Host;port=$Port;$dbident=$Database";
+print "$Dsn\n";
+$Dbh = DBI->connect( $Dsn , $User , $Password  , { LongReadLen => 10240*10240 , LongTruncOk => 1 , AutoCommit => 0 , RaiseError => 1 } ) or croak( "$DBI::errstr" );
+
+# Set exit value
+my $EV = 0;
+
+
+while( 1 )
+{
+  eval
+  {
+
+    if( $Input eq "argv" )
+    {
+      die "end\n" if ! @ARGV;
+      $Sql = shift( @ARGV );
+    }
+    elsif( $Input eq "file" )
+    {
+      die "end\n" if $Sql;
+      open( F , $SqlStringFile ) or die "$SqlStringFile: $!\n";
+      local $/ = undef;
+      $Sql = <F>;
+      close( F ) or die "$SqlStringFile: $!\n";
+    }
+    else
+    {
+      die "end\n" if eof();
+      chomp( $Sql = <> );
+    }
+
+    croak( "No query given.\n" ) if ! $Sql;
+    croak( "No ';' allowed.\n" ) if( $Sql =~ /;/ );
+
+    my $StartTime = [gettimeofday];
+
+    if( $Explain )
+    {
+      Explain( $Dbh , $Sql );
+      die "end\n";
+    }
+
+    my $Sth = $Dbh->prepare( $Sql );
+
+    # Do we have a select statement?
+    if( $Sql =~ /^\s*select/i )
+    {
+      my $Rows = 0;
+      my $Count = 0;
+      $Delimiter = $ODelimiter if $ODelimiter;
+
+      # Check for list file
+      if( $List && -e $List )
+      {
+        my $IDelimiter = $ODelimiter;
+        my $Split = $IDelimiter;
+        $Split = "$Quotes$IDelimiter$Quotes" if( $IDelimiter && $Quotes);
+        open( LIST , $List ) or croak( "$List: $!.\n" );
+
+        while( <LIST> )
+        {
+          chomp;
+          s/^$Quotes// if $Quotes;
+          s/$Quotes$// if $Quotes;
+
+          my @List = ( $_ );
+          @List = split( /$Split/ ) if $Split;
+
+          $Sth->execute( @List );
+
+          while( my @Row = $Sth->fetchrow_array() )
+          {
+            @Row = map{ defined $_ ? $_ : "(null)" } @Row;
+            @Row = map{ $Quotes . $_ . $Quotes } @Row if $Quotes;
+            print join( $Delimiter , @Row ) . "\n";
+
+            $Count++;
+            last if($Number > 0 && $Count >= $Number );
+          }
+
+          $Rows = $Rows + $Sth->rows();
+
+          last if($Number > 0 && $Count >= $Number );
+        }
+
+        close( LIST ) or croak( "$List: $!.\n" );
+      }
+      else
+      {
+        $Sth->execute( );
+        if( $Single )
+        {
+          my @Row = $Sth->fetchrow_array();
+          if( @Row )
+          {
+            my $Cnt = 0;
+            for my $Val ( @Row )
+            {
+              my $Key = $Sth->{NAME}->[$Cnt];
+              $Val = "(null)" if ! defined $Val;
+              print "$Key $Val\n";
+              $Cnt++;
+            }
+          }
+        }
+        else
+        {
+          while( my @Row = $Sth->fetchrow_array() )
+          {
+            @Row = map{ defined $_ ? $_ : "(null)" } @Row;
+            @Row = map{ $Quotes . $_ . $Quotes } @Row if $Quotes;
+            print join( $Delimiter , @Row ) . "\n";
+
+            $Count++;
+            last if($Number > 0 && $Count >= $Number );
+          }
+        }
+
+        $Rows = $Sth->rows();
+      }
+
+      $Sth->finish;
+
+      my $Elapsed = tv_interval( $StartTime );
+      my $RowsPerSecond = $Rows/$Elapsed;
+
+      $Sql =~ s/%/%%/g;
+      printf STDERR "-" x 20 . qq|\n$Sql:\nFetched %d rows in %.3f seconds (%d rows per second).\n| , $Rows , $Elapsed , $RowsPerSecond;
+
+    }
+    # Other statements
+    else
+    {
+      my $Rows = 0;
+
+      # Check for list file
+      if( $List && -e $List )
+      {
+        $Delimiter = $ODelimiter;
+        my $Split = $Delimiter;
+        $Split = "$Quotes$Delimiter$Quotes" if( $Delimiter && $Quotes);
+        open( LIST , $List ) or croak( "$List: $!.\n" );
+
+        while( <LIST> )
+        {
+          chomp;
+          s/^$Quotes// if $Quotes;
+          s/$Quotes$// if $Quotes;
+
+          my @List = ( $_ );
+          @List = split( /$Split/ , $_ , -1 ) if $Split;
+
+          $Sth->execute( @List );
+          $Rows = $Rows + $Sth->rows();
+          if( $Verbose && $Sth->rows() == 0 )
+          {
+            my $List = join( "," , @List );
+            print qq|No update for list '$List'.\n|;
+          }
+        }
+
+        close( LIST ) or croak( "$List: $!.\n" );
+      }
+      # Single statement
+      else
+      {
+        $Sth->execute();
+        $Rows = $Sth->rows();
+      }
+
+      my $Elapsed = tv_interval( $StartTime );
+      my $RowsPerSecond = int( $Rows/$Elapsed );
+
+      if( $Test )
+      {
+        $Dbh->rollback();
+      }
+      else
+      {
+        $Dbh->commit();
+      }
+
+      $Sql =~ s/%/\\%/g;
+      printf STDERR "-" x 20 . qq|\n$Sql:\nHandled %d rows in %.3f seconds (%d rows per second).\n| , $Rows , $Elapsed , $RowsPerSecond;
+    }
+
+  };
+
+  last if( $@ && $@ =~ /^end\n/i );
+
+  # Handle errors
+  if( $@ )
+  {
+    $@ = "$@\n" if( $@ !~ /\n$/ );
+    $Sql =~ s/%/\\%/g;
+    print STDERR "-" x 20 . "\n$Sql:\n$@";
+    $EV = 1;
+  }
+}
+
+eval{ local $SIG{__WARN__} = sub {}; $Dbh->disconnect if $Dbh; };
+
+exit( $EV );
+
+sub Explain
+{
+  my $Dbh = shift;
+  my $Sql = shift;
+
+  $Dbh->do( "explain plan set statement_id = 'PSD1' for $Sql" );
+
+  my $Ref = $Dbh->selectall_arrayref( "select plan_table_output from table(dbms_xplan.display('plan_table',null,'serial'))" );
+
+  print join( "\n" , map{ $_->[0] } @$Ref ) . "\n";
+}

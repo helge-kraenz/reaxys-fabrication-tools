@@ -1,0 +1,79 @@
+#!/usr/local/bin/perl -w
+
+use DBI;
+use strict;
+use Getopt::Long;
+use Carp;
+use Time::HiRes qw( gettimeofday tv_interval );
+use File::Glob ':glob';
+
+my $Config  = "default";
+my $SqlFile = undef;
+
+GetOptions( "Config=s" => \$Config );
+
+# Read in configuration
+if( ! $SqlFile )
+{
+  $SqlFile = "./.sql";
+  ( $SqlFile ) = File::Glob::glob( '~/.sql' , GLOB_TILDE | GLOB_ERR ) if( ! -e $SqlFile );
+}
+
+my( $User , $Password , $Database , $Host , $Port );
+open( F , $SqlFile ) or croak( "$SqlFile: $!\n" );
+while( <F> )
+{
+  chomp;
+  my( $RConfig , $RConnectstring ) = m/^\s*(\S+)\s*(\S.*)$/;
+  next if( $RConfig ne $Config );
+  ( $User , $Password , $Database , $Host , $Port ) = ( $RConnectstring =~ m/^(\S+?)\/(\S+?)\@(\S+?)(?:$|\s+(\S+)\s+(\S+)\s*$)/ );
+}
+close( F ) or croak( "~/.sql: $!\n" );
+
+my $Dsn = ( ( $Host && $Port ) ? "dbi:Proxy:hostname=$Host;port=$Port;dsn=dbi:Oracle:$Database" : "dbi:Oracle:$Database" );
+my $Dbh = DBI->connect( $Dsn , $User , $Password  , { LongReadLen => 10240*10240 , LongTruncOk => 1 , AutoCommit => 0 , RaiseError => 1 } ) or croak( "$DBI::errstr" );
+#my $Dbh = DBI->connect( "dbi:Oracle:$Database" , $User , $Password  , { LongReadLen => 1024000*1024000 , LongTruncOk => 1 , AutoCommit => 0 , RaiseError => 1 } ) or croak( "$DBI::errstr" );
+
+
+my @Tables = ();
+if( ! @ARGV )
+{
+  my $RCol = $Dbh->selectcol_arrayref( "select table_name from user_tables order by table_name" );
+  push( @Tables , @$RCol );
+}
+else
+{
+  push( @Tables , map{ uc } @ARGV  );
+}
+
+my( $Colname , $Datatype , $Datalength );
+my $Sth = $Dbh->prepare( "select column_name,data_type,data_length from user_tab_columns where table_name = ? order by column_id" );
+my $Sth2 = $Dbh->prepare( "select index_name from user_ind_columns where table_name = ? and column_name = ? " );
+for my $Table ( @Tables )
+{
+  $Sth->execute( $Table );
+  my $Ref = $Sth->fetchall_arrayref;
+
+  my @Max = ( undef , undef , undef );
+  for my $Row ( @$Ref )
+  {
+    $Sth2->execute( $Table , $Row->[0] );
+    my @Indexes = map{ $_->[0] } @{$Sth2->fetchall_arrayref};
+    my $Indexes = join( " " , @Indexes );
+    push( @$Row , $Indexes );
+
+    for ( 0..$#{$Row} )
+    {
+      my $Len = length $Row->[$_];
+      $Max[$_] = $Len if( ! defined $Max[$_] || $Len > $Max[$_] );
+    }
+  }
+
+  my $FormatString = "%s  " . join( " " , map{ "%-${_}s" } @Max ) . "\n";
+  for my $Row ( @$Ref )
+  {
+    printf( $FormatString , $Table , @$Row );
+  }
+}
+
+$Dbh->rollback;

@@ -1,0 +1,88 @@
+#!/usr/bin/perl
+
+use strict;
+use JSON;
+use Data::Dumper;
+use File::Copy;
+use Getopt::Long;
+
+my $Dry = undef;
+my $Verbose = undef;
+
+GetOptions( "dry" => \$Dry , "verbose" => \$Verbose );
+
+my $Token = shift;
+die "No token given!\n" if ! $Token;
+
+my $C1 = qq(aws  --profile gettoken sts get-session-token --serial-number arn:aws:iam::793262302463:mfa/h.kraenz\@elsevier.com --token-code $Token);
+print "$C1\n" if $Verbose;
+my $res = `$C1`;
+
+my $r = $?;
+if( $r )
+{
+  die "Cannot execute '$C1'!\n" if $r == -1;
+  if( $r & 127 )
+  {
+    my $rr = sprintf "Command '$C1' terminated due to signal %s!\n" , ($r&127);
+    die $rr;
+  }
+  my $rr = sprintf "Command '$C1' terminated with exit code %s!\n" , ($r>>8);
+  die $rr;
+}
+
+my $json = decode_json( $res );
+my $st = $json->{Credentials}->{SessionToken};
+my $ak = $json->{Credentials}->{AccessKeyId};
+my $sak = $json->{Credentials}->{SecretAccessKey};
+
+my $f = glob( "~/.aws/credentials" );
+#$f = "credentials";
+my $b = "$f.bak";
+
+my $C2 = "cp $f $b";
+print "$C2\n" if $Verbose;
+if( ! $Dry )
+{
+  die "Cannot copy $f to $b: $!\n" if system( $C2 );
+}
+open( B , "<" , $b ) or die "$b: $!\n";
+if( ! $Dry )
+{
+  open( F , ">" , $f ) or die "$f: $!\n";
+}
+
+my $s = "";
+my $dd = 0;
+while( <B> )
+{
+  my $x = $_;
+  if( /^\[/ )
+  {
+    ( $s ) = ( m{^\[(.*?)\]} );
+  }
+  else
+  {
+    if( $s eq "default" )
+    {
+      next if $dd;
+      $dd = 1;
+      $x = "aws_access_key_id = $ak\naws_secret_access_key = $sak\naws_session_token = $st\n";
+      print "[default]\n$x" if $Verbose;
+    }
+  }
+
+  if( ! $Dry )
+  {
+    print F $x;
+  }
+}
+
+if( ! $Dry )
+{
+  close( F );
+}
+close( B );
+
+print "Updated $f successfully!\n";
+exit;

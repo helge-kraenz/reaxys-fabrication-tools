@@ -1,0 +1,51 @@
+#!/usr/bin/perl -w
+
+use strict;
+use Carp;
+use Getopt::Long;
+
+my $File = undef;
+my $Help = undef;
+my $Percent = 10;
+
+GetOptions( "help" => \$Help , "percent=s" => \$Percent );
+$File = shift;
+
+if( $Help || ! $File )
+{
+  print "Usage: sample.pl [-h] [-p <percent>] <file>\n";
+  print "  -p <percent> ranges from 0 to 100, default is 10.\n";
+  exit;
+}
+
+# Check percent range
+croak( "Percent has to be within [0,100].\n" ) if( $Percent < 0 || $Percent > 100 );
+$Percent = $Percent/100.0;
+
+# Count number of lines
+my $Count = `wc -l $File| cut -d " " -f 1`;
+
+# Generate sample
+my $NSample = int( $Count * $Percent );
+my %Array;
+for( my $CSample = 0 ; $CSample < $NSample ; )
+{
+  my $Nr = int( rand( $Count ) + 1 );
+  if( ! $Array{$Nr} )
+  {
+    $Array{$Nr} = 1;
+    $CSample++;
+  }
+}
+
+# Move file pointer at the beginning
+open( F , "<" , $File ) or die "$File: $!\n";
+
+# Read file again
+my $Count2 = 0;
+while( <F> )
+{
+  $Count2++;
+  print if $Array{$Count2};
+}
+
