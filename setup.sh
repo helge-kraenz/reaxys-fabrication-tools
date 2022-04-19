@@ -49,4 +49,4 @@ fi
 # else.                                                    #
 ############################################################
 alias stools='(cd $TOOLS ; create-archive -z s3://nameservice/releases/tools MANIFEST-tools)'
-alias ltools='aws s3 ls s3://nameservice/releases/tools/| tail -1 | awk "{print \$4}"'
+alias ltools='aws s3 ls s3://nameservice/releases/tools/| grep "PRE" | tail -1 | awk "{print \$2}"'
