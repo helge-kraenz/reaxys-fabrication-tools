@@ -1,0 +1,425 @@
+#!/usr/bin/perl
+
+# Header {{{
+#==============================================================#
+#==============================================================#
+#
+# Version: 1.0.0
+# Updated: 2022-06-13
+# Author: Helge Kraenz
+#
+# History
+# 1.0.0   Initial    kraenzh
+#
+#==============================================================#
+#==============================================================#
+
+#==============================================================#
+# The source and the computer programming technology embodied
+# herein constitute commercially valuable trade secrets and
+# copyrighted material of Elsevier Information Systems GmbH
+# and its licensors. You are not permitted to copy or disclose
+# or allow to be disclosed any data or information with respect
+# to this source or the computer programming technology
+# embodied herein, or any documentation, drawings,
+# descriptions, models, reports or other media relating hereto
+# except as permitted in writing by Elsevier Information
+# Systems GmbH.
+#==============================================================#
+# Header }}}
+
+# Modules and pragmas {{{
+use strict;
+use warnings;
+use File::Path qw( make_path remove_tree );
+use File::Basename;
+use File::Spec::Functions qw( :ALL );
+use Getopt::Long;
+use Data::Dumper;
+use Pod::Usage;
+use Carp;
+use Cwd qw( abs_path );
+use Log::Log4perl qw( get_logger );
+use Log::Log4perl::Level;
+use Proc::Queue qw( :all );
+use Time::HiRes qw( usleep gettimeofday );
+use POSIX ":sys_wait_h";
+use IPC::Run qw( run );
+use Storable;
+use DBI;
+use File::stat;
+use Elsevier::Database 1.00;
+# Modules and pragmas }}}
+
+# Variables {{{
+# Define global variables
+our $CommandLine = join( " " , ( $0 , @ARGV ) );
+my $Options = {};
+my $IndiTab = $ENV{"INDITAB"};
+   $IndiTab = "." if( ! $IndiTab || ! -d $IndiTab );
+$Options->{logconf}   = abs_path( catfile( $IndiTab , "log.conf" ) );
+$Options->{tempdir}   = File::Spec->tmpdir();
+$Options->{parallel}  = 4;
+$Options->{output}    = "-";
+$Options->{type}      = undef;
+$Options->{break}     = 0;
+my $TotalErrors = 0;
+my @RemoveFiles = ();
+my $Version = "1.0.0";
+my $MyName  = basename( $0 );
+my $MainPid = $$;
+my $Single = undef;
+# Variables }}}
+
+# Parse command line {{{
+my $ParseResult = GetOptions( $Options , "break" , "field=s" , "help|h" , "keep" , "logconf=s" , "man" , "output=s" , "parallel=i" , "single" , "type=s" , "version|V" );
+pod2usage( 1 ) if ! $ParseResult;
+# Parse command line }}}
+
+# Setup fundamental logging {{{
+croak( "Log definition file undefined, stopping" ) if ( ! $Options->{logconf} );
+croak( "Cannot find log definition file $Options->{logconf}, stopping" ) if ( ! -s $Options->{logconf} );
+Log::Log4perl->init_and_watch( $Options->{logconf} , 'HUP' ) if( ! Log::Log4perl->initialized() );
+our $MainLogger = get_logger( "Rtl" );
+$MainLogger->info( "START $CommandLine" );
+# Setup fundamental logging }}}
+
+# Handle trivial options {{{
+pod2usage( 0 ) if $Options->{help};
+pod2usage( -verbose => 2 , -exitval => 0 ) if $Options->{man};
+if( $Options->{version} )
+{
+  print( "This is $MyName, version $Version\n" );
+  exit;
+}
+# Handle trivial options }}}
+
+# Startup {{{
+
+# Abbreviations {{{
+my $Field      = $Options->{field};
+my $Parallel   = $Options->{parallel};
+my $Type       = $Options->{type};
+my $Break      = $Options->{break};
+   $Single     = $Options->{single};
+my $Outfile    = $Options->{output};
+# Abbreviations }}}
+
+# Startup message {{{
+my $Logger = get_logger( "xf-extract" );
+$Logger->info( "$MyName $Version started" );
+$Logger->info( "Call: $CommandLine" );
+# Startup message }}}
+
+# Check parameters {{{
+if( ! $Type )
+{
+  $Logger->fatal( "Type unset" );
+  exit( 2 );
+}
+if( ! $Outfile )
+{
+  $Logger->fatal( "Output file unset" );
+  exit( 2 );
+}
+if( ! $Parallel || $Parallel !~ /^\d+$/ )
+{
+  $Logger->fatal( "Parallel value is no a number" );
+  exit( 2 );
+}
+# Check parameters }}}
+
+# Dump parameters {{{
+for my $Key( sort keys %$Options )
+{
+  my $Val = $Options->{$Key} || "";
+  $Logger->debug( "Parameter $Key: $Val" );
+}
+# Dump parameters }}}
+
+Proc::Queue::size( $Parallel );
+my $STS = gettimeofday;
+# Startup }}}
+
+# Payload {{{
+
+# Check if field is defined {{{
+my $FieldByType = 
+{
+  "cit" => "R1_",
+};
+if( ! $Field )
+{
+  $Field = $FieldByType->{$Type};
+}
+
+if( ! $Field )
+{
+  $Logger->fatal( "Index field not defined" );
+  exit( 2 );
+}
+# Check if field is defined }}}
+
+# Prepare database related stuff {{{
+my $Db = Elsevier::Database->new( xmlfile => "tab/database.xml" , database => "sqlite" , loglevel => $ERROR , pattern => "xfei-" );
+if( ! $Db )
+{
+  $Logger->fatal( "Cannot connect to database" );
+  exit 2;
+}
+
+my $IndexDb = $Db->dbname;
+
+$Logger->info( "Database in $IndexDb prepared" );
+# Prepare database related stuff }}}
+
+# Extract records {{{
+my $IndexTable = $Db->getFirstRow( "xfei-get-index-table" , $Type );
+my $Rows       = $Db->execute( "xfei-get-filenames" , $Type )->fetchall_arrayref;
+
+# Open files {{{
+my $FileInfo    = {};
+for my $Row ( @$Rows )
+{
+  my( $Id , $Path ) = @$Row;
+  $FileInfo->{$Id}->{Path} = $Path;
+
+  my $Handle;
+  if( ! open( $Handle , "<" , $Path ) )
+  {
+    $Logger->error( "Cannot open input file $Path" );
+    $Logger->error( "Message: $!" );
+    exit 1;
+  }
+  $FileInfo->{$Id}->{Handle} = $Handle;
+}
+
+my $OutHandle;
+if( $Outfile ne "-" )
+{
+  if( ! open( $OutHandle , ">" , $Outfile ) )
+  {
+    $Logger->error( "Cannot open input file $Outfile" );
+    $Logger->error( "Message: $!" );
+    exit 1;
+  }
+}
+else
+{
+  if( ! open( $OutHandle , ">&STDOUT" ) )
+  {
+    $Logger->error( "Cannot dup stdout" );
+    $Logger->error( "Message: $!" );
+    exit 1;
+  }
+}
+# Open files }}}
+
+# Get records {{{
+my $Sth = $Db->dbh->prepare( "select fileid,position from $IndexTable where id = ?" );
+if( ! $Single )
+{
+  while( <> )
+  {
+    chomp;
+    dumpRecord( $_ );
+  }
+}
+else
+{
+  for ( @ARGV )
+  {
+    dumpRecord( $_ );
+  }
+}
+$Sth->finish;
+# Get records }}}
+
+# Close files {{{
+for my $Id ( sort keys %$FileInfo )
+{
+  my $Handle = $FileInfo->{$Id}->{Handle};
+  my $Path   = $FileInfo->{$Id}->{Path};
+  if( ! close( $Handle ) )
+  {
+    $Logger->error( "Cannot close input file $Path" );
+    $Logger->error( "Message: $!" );
+    exit 1;
+  }
+}
+if( $Outfile ne "-" )
+{
+  if( ! close( $OutHandle ) )
+  {
+    $Logger->error( "Cannot close output file $Outfile" );
+    $Logger->error( "Message: $!" );
+    exit 1;
+  }
+}
+# Close files }}}
+
+my $Ela = gettimeofday - $STS;
+$Logger->info( sprintf( "Execution time %.2f seconds" , $Ela ) );
+
+# Extract records }}}
+
+# Payload }}}
+
+# End & exit {{{
+exit( $TotalErrors );
+# End & exit }}}
+
+# END {{{
+END
+{
+  if( $Db )
+  {
+    $Db->dbh->rollback;
+    $Db = undef;
+  }
+
+  $MainLogger->info( "END $? $CommandLine" ) if $MainLogger;
+
+  if( $TotalErrors )
+  {
+    $Logger->info( "There were $TotalErrors errors" );
+  }
+  else
+  {
+    $Logger->info( "There were no errors" );
+  }
+  $Logger->info( "$MyName $Version ended" );
+}
+# END }}}
+
+sub dumpRecord
+{
+  my $Id = shift;
+  $Sth->execute( $Id );
+  my( $FileId , $Position ) = $Sth->fetchrow_array();
+
+  if( $Sth->rows == 0 )
+  {
+    if( $Break )
+    {
+      $Logger->error( "No entry for id $Id found - terminating" );
+      $TotalErrors = 1;
+      exit 1;
+    }
+    $Logger->trace( "No entry for id $Id found" );
+  }
+  else
+  {
+    my $Handle = $FileInfo->{$FileId}->{Handle};
+    seek( $Handle , $Position , 0 );
+    local $/ = "\02";
+    my $Record = <$Handle>;
+    print $OutHandle $Record;
+    $Logger->trace( "$Id: $FileId $FileInfo->{$FileId}->{Path} $Position" );
+  }
+}
+
+__END__
+
+=head1 NAME
+ 
+xf-extract - Extracts records from 3-byte files
+ 
+=head1 SYNOPSIS
+ 
+xf-extract [options] file [XF ...]
+ 
+ Options:
+   -field <name>      The name of the field holding index number
+   -help              brief help message
+   -keep              keep temp files
+   -logconf <file>    log conf file
+   -man               full documentation
+   -parallel <jobs>   parallel jobs
+   -tempdir <dir>     temporary directory
+   -version           print version and exit
+ 
+=head1 OPTIONS
+ 
+=over 4
+ 
+=item B<-field name>
+ 
+The name of the index field. If not given, the very first field of the first file
+is used as default.
+ 
+=item B<-help>
+ 
+Print a brief help message and exits.
+ 
+=item B<-keep>
+ 
+Controls if the temporary files will be kept or deleted. Default is deletion.
+ 
+=item B<-logconf file>
+ 
+The full path to a log configuration file for Log4Perl.
+ 
+=item B<-man>
+ 
+Prints the manual page and exits.
+ 
+=item B<-parallel jobs>
+ 
+Defines the number of parallel jobs. Defaults to 4.
+ 
+=item B<-tempdir dir>
+ 
+The directory for temporary files. Defaults to system temp dir.
+ 
+=item B<-type type>
+ 
+The type of files, e.g. cit, rea, fct, ... If unset this is determined by the field, e.g. R1_
+indicaters that it's a citation index.
+ 
+=item B<-version>
+ 
+Prints the version and exits.
+ 
+=back
+ 
+=head1 DESCRIPTION
+ 
+B<This program> creates a combined index for XF files.
+
+It scans all input files. For each record found it extracts the value of the first
+field. Each record must start with the field given in command line or extracted
+from first file. The value is stored
+along with the file position and the offset in a temporary index file.
+
+The temporary index files are stored in the temporary directory and are typically
+deleted at the end. The temporary directory is created if it doesn't exist but
+it won't be removed at the end.
+
+The temporary files are loaded into a database, sqlite is the only one supported right now.
+This depends on the setting in tab/database.xml.
+Some entries in table "files" are created which are used to check if subindexes
+need to be re-created if the program runs again.
+
+The final index is loaded into a table named "<type>index" which can be used by the user
+or other programs.
+
+This programm supported queues. All indexing jobs are pushed on the queue and will
+be executed in parallel if requested. By default
+
+=head1 EXAMPLES
+ 
+Create an index named cit.idx over all citation files. It uses systems temp directory
+and deletes the temporary files afterwards.
+
+$ xf-create-index -type cit -f R1_ cit*xf
+
+The same as above with given temp directory and no deletion of temp files:
+
+$ xf-create-index -i cit.idx -f R1_ -t temp -k cit*xf
+
+The same as above but running with 16 parallel jobs:
+
+$ xf-create-index -i cit.idx -f R1_ -t temp -k -p 16 cit*xf
+
+=cut

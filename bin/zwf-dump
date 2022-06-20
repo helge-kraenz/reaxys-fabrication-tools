@@ -1,0 +1,15 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+$/ = "\02";
+
+while( <> )
+{
+  chomp;
+  s{\01}{\n}msg;
+  s{\03}{\n=== FACT ===}msg;
+  print "$_\n=== RECORD ===";
+}
+print "\n";

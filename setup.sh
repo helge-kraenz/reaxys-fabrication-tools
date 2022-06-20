@@ -3,7 +3,7 @@
 #                                                          #
 # The base directory of the tools directory.               #
 ############################################################
-export TOOLS=$PWD
+export TOOLS=$(realpath $(dirname ${BASH_SOURCE[0]}))
 
 ############################################################
 # PATH                                                     #
@@ -15,7 +15,7 @@ export TOOLS=$PWD
 # This directory is part of the delivery and should rarely #
 # been required to changed.                                #
 ############################################################
-export PATH=$PWD/bin:$PATH
+export PATH=$TOOLS/bin:$PATH
 
 ############################################################
 # Cleanup                                                  #
