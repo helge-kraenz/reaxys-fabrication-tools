@@ -1,0 +1,83 @@
+<config>
+
+  <!-- SQLite with existent file name -->
+  <connection database="sqlite">
+    <driver>sqlite</driver>
+    <dbname>tab/xfindex-database.sqlite3</dbname>
+  </connection>
+
+  <statements>
+
+<!-- Statements for xf-create-index {{{ -->
+
+<!-- Statement to create files table if it doesn't exist {{{ -->
+    <statement name="xfci-create-table">
+      create table if not exists files
+      (
+        id integer primary key ,
+        filename varchar( 100 ) default NULL,
+        indexname varchar( 100 ) ,
+        filedate number default 0,
+        indexdate number ,
+        shortname varchar( 20 ) ,
+        type varchar( 20 ) ,
+        build number default 0,
+        fileid number
+      )
+    </statement>
+<!-- Statement to create files table if it doesn't exist }}} -->
+
+<!-- Statements for file based subindexes {{{ -->
+
+    <statement name="xfci-insert-subindex" lazy="1">
+      insert into files (filename,indexname,filedate,indexdate,shortname,type,build,fileid) values ( ? , ? , ? , ? , ? , ? , ? , ? )
+    </statement>
+
+    <statement name="xfci-delete-subindex" lazy="1">
+      delete from files where type = ? and filename = ?
+    </statement>
+
+    <statement name="xfci-get-all-subindexes" lazy="1">
+      select id , filename , indexname , shortname , build from files where type = ? and shortname != 'main' order by fileid
+    </statement>
+
+    <statement name="xfci-update-subindex" lazy="1">
+      update files set build = 0 , indexdate = ? where shortname = ?
+    </statement>
+
+<!-- Statements for file based subindexes }}} -->
+
+<!-- Statements for main indexes {{{ -->
+    <statement name="xfci-get-main-index" lazy="1">
+      select count(*) from files where type = ? and shortname = 'main'
+    </statement>
+
+    <statement name="xfci-insert-main-index" lazy="1">
+      insert into files (indexname,indexdate,shortname,type,fileid) values ( ? , ? , 'main' , ? , 0 )
+    </statement>
+
+    <statement name="xfci-delete-main-index" lazy="1">
+      delete from files where type = ? and shortname = 'main'
+    </statement>
+
+    <statement name="xfci-check-main-index" lazy="1">
+      select count(*) from files where type = ? and shortname != 'main' and indexdate >= ( select indexdate from files where type = ? and shortname = 'main' )
+    </statement>
+<!-- Statements for main indexes }}} -->
+
+<!-- Statements for xf-create-index }}} -->
+
+<!-- Statements for xf-extract-index {{{ -->
+
+    <statement name="xfei-get-index-table">
+      select indexname from files where type = ? and shortname = 'main' and fileid = 0
+    </statement>
+
+    <statement name="xfei-get-filenames">
+      select id,filename from files where type = ? and shortname != 'main' order by fileid
+    </statement>
+
+<!-- Statements for xf-extract-index }}} -->
+
+  </statements>
+</config>
