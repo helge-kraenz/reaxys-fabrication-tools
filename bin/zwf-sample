@@ -1,0 +1,1316 @@
+#!/usr/bin/perl
+
+# Header {{{
+#==============================================================#
+#==============================================================#
+#
+# Version: 1.0.0
+# Updated: 2022-07-12
+# Author: Helge Kraenz
+#
+# History
+# 1.0.0   Initial    kraenzh
+#
+#==============================================================#
+#==============================================================#
+
+#==============================================================#
+# The source and the computer programming technology embodied
+# herein constitute commercially valuable trade secrets and
+# copyrighted material of Elsevier Information Systems GmbH
+# and its licensors. You are not permitted to copy or disclose
+# or allow to be disclosed any data or information with respect
+# to this source or the computer programming technology
+# embodied herein, or any documentation, drawings,
+# descriptions, models, reports or other media relating hereto
+# except as permitted in writing by Elsevier Information
+# Systems GmbH.
+#==============================================================#
+# Header }}}
+
+# Modules and pragmas {{{
+use strict;
+use warnings;
+use File::Path qw( make_path remove_tree );
+use File::Basename;
+use File::Spec::Functions qw( :ALL );
+use Getopt::Long;
+use Data::Dumper;
+use Pod::Usage;
+use Carp;
+use Cwd qw( abs_path );
+use Log::Log4perl qw( get_logger );
+use Log::Log4perl::Level;
+#use Proc::Queue qw( :all );
+use Time::HiRes qw( usleep gettimeofday );
+#use POSIX ":sys_wait_h";
+use IPC::Run qw( run );
+#use Storable;
+use DBI;
+use File::stat;
+use Elsevier::Database 1.00;
+use XML::LibXML;
+# Modules and pragmas }}}
+
+# Variables {{{
+# Define global variables
+our $CommandLine = join( " " , ( $0 , @ARGV ) );
+my $Options = {};
+my $IndiTab = $ENV{"INDITAB"};
+   $IndiTab = "." if( ! $IndiTab || ! -d $IndiTab );
+$Options->{logconf}    = abs_path( catfile( $IndiTab , "log.conf" ) );
+$Options->{references} = 1;
+$Options->{purge}      = 0;
+$Options->{delete}     = 0;
+$Options->{outdir}     = undef;
+$Options->{sample}     = "sample";
+#$Options->{parallel}  = 4;
+my $TotalErrors = 0;
+my @RemoveFiles = ();
+my $Version = "1.0.0";
+my $MyName  = basename( $0 );
+my $Overwrite = 0;
+#my $MainPid = $$;
+#my $Single = undef;
+# Variables }}}
+
+# Parse command line {{{
+my $ParseResult = GetOptions( $Options , "config=s" , "delete" , "help|h" , "logconf=s" , "man" , "outdir=s" , "purge" , "references!" , "sample=s" , "version|V" );
+pod2usage( 1 ) if ! $ParseResult;
+# Parse command line }}}
+
+# Setup fundamental logging {{{
+croak( "Log definition file undefined, stopping" ) if ( ! $Options->{logconf} );
+croak( "Cannot find log definition file $Options->{logconf}, stopping" ) if ( ! -s $Options->{logconf} );
+Log::Log4perl->init_and_watch( $Options->{logconf} , 'HUP' ) if( ! Log::Log4perl->initialized() );
+our $MainLogger = get_logger( "Rtl" );
+$MainLogger->info( "START $CommandLine" );
+# Setup fundamental logging }}}
+
+# Handle trivial options {{{
+pod2usage( 0 ) if $Options->{help};
+pod2usage( -verbose => 2 , -exitval => 0 ) if $Options->{man};
+if( $Options->{version} )
+{
+  print( "This is $MyName, version $Version\n" );
+  exit;
+}
+# Handle trivial options }}}
+
+# Startup {{{
+
+# Abbreviations {{{
+my $ConfigFile    = $Options->{config};
+my $References    = $Options->{references};
+my $Purge         = $Options->{purge};
+my $Delete        = $Options->{delete};
+my $SampleMarker  = $Options->{sample};
+my $IndexMarker   = "index";
+#my $FilesTable    = "${IndexMarker}_files";
+my $FilesTable    = "files";
+my $TrackingTable = "${SampleMarker}_tracking";
+# Abbreviations }}}
+
+# Startup message {{{
+my $Logger = get_logger( "zwf-sample" );
+$Logger->info( "$MyName $Version started" );
+$Logger->info( "Call: $CommandLine" );
+# Startup message }}}
+
+# Check parameters {{{
+if( ! $ConfigFile )
+{
+  $Logger->fatal( "Config file unset" );
+  exit( 2 );
+}
+if( ! -s $ConfigFile )
+{
+  $Logger->fatal( "Config file $ConfigFile not found or empty" );
+  exit( 2 );
+}
+# Check parameters }}}
+
+# Dump parameters {{{
+for my $Key( sort keys %$Options )
+{
+  my $Val = $Options->{$Key} || "";
+  $Logger->debug( "Parameter $Key: $Val" );
+}
+# Dump parameters }}}
+
+my $STS = gettimeofday;
+# Startup }}}
+
+# Payload {{{
+
+# Parse configuration XML {{{
+$Logger->debug( "Parsing config xml '$ConfigFile'" );
+my $ContextCount = 0;
+my $Dom = XML::LibXML->load_xml( location => $ConfigFile );
+my $Database = $Dom->findvalue( "/sample/database" );
+if( ! $Database )
+{
+  $Logger->fatal( "SQLite database not defined" );
+  exit 2;
+}
+my $OutDir   = $Options->{outdir} || $Dom->findvalue( "/sample/output/dir" );
+if( ! $OutDir )
+{
+  $Logger->fatal( "Output directory not defined" );
+  exit 2;
+}
+if( ! -d $OutDir )
+{
+  eval{ make_path( $OutDir ); };
+  if( ! -d $OutDir )
+  {
+    $Logger->fatal( "Output directory not defined" );
+    exit 2;
+  }
+  $Logger->info( "Output directory $OutDir created" );
+}
+my $OutFile   = $Dom->findvalue( "/sample/output/file" );
+if( ! $OutFile )
+{
+  $Logger->fatal( "Output file not defined" );
+  exit 2;
+}
+my $OutLimitedBy   = $Dom->findvalue( "/sample/output/limited-by" );
+if( ! $OutLimitedBy )
+{
+  $Logger->info( "Output file limitation not defined using 'unlimited'" );
+  $OutLimitedBy = "unlimited";
+}
+if( $OutLimitedBy !~ m{^unlimited|size|record$} )
+{
+  $Logger->info( "Output file limitation must be one of 'unlimited', 'size' and 'record'" );
+  exit 2;
+}
+my $OutLimit = $Dom->findvalue( "/sample/output/limit" );
+if( ! defined $OutLimit && $OutLimitedBy =~ m{^size|record$} )
+{
+  $Logger->info( "Output file limit must be defined for 'size' and 'record'" );
+  exit 2;
+}
+if( ! $SampleMarker || $SampleMarker eq $IndexMarker || $SampleMarker !~ /^\w+$/ )
+{
+  $Logger->fatal( "SampleMarker for tables not defined or incorrect" );
+  exit 2;
+}
+
+my @ContextNodes = $Dom->findnodes( qq{/sample/contexts/context} );
+$Logger->debug( "Found " . scalar( @ContextNodes ) . " context definitions" );
+
+my $Contexts = {};
+for my $ContextNode ( @ContextNodes )
+{
+  # Check name {{{
+  my $ContextName = $ContextNode->getAttribute( "name" );
+  $ContextCount++;
+  if( ! $ContextName )
+  {
+    $Logger->fatal( "Context #$ContextCount has no name" );
+    exit 2;
+  }
+  $Logger->info( "Parsing definition of context #$ContextCount '$ContextName'" );
+  # Check name }}}
+
+  # Basic context settings {{{
+  $Contexts->{$ContextName}->{order}       = $ContextNode->getAttribute( "order" ) || "9999";
+  #$Contexts->{$ContextName}->{indextable}  = "${IndexMarker}_$ContextName";
+  $Contexts->{$ContextName}->{indextable}  = "${ContextName}${IndexMarker}";
+  $Contexts->{$ContextName}->{sampletable} = "${SampleMarker}_${ContextName}";
+  $Contexts->{$ContextName}->{outfile}     = $OutFile;
+  $Contexts->{$ContextName}->{outdir}      = $OutDir;
+  $Contexts->{$ContextName}->{record}      = $ContextCount;
+  $Contexts->{$ContextName}->{subsets}     = [];
+  $Contexts->{$ContextName}->{citations}   = [];
+  $Contexts->{$ContextName}->{facts}       = [];
+  # Basic context settings }}}
+
+  # Read subset definitions {{{
+  my $SourceCount = 0;
+  my @SourceNodes = $ContextNode->findnodes( qq{subset/source} );
+  for my $SourceNode ( @SourceNodes )
+  {
+    $SourceCount++;
+    my $Type = $SourceNode->getAttribute( "type" );
+    my $Content = $SourceNode->to_literal;
+    my $Source = {};
+    if( ! $Type )
+    {
+      $Logger->fatal( "Source #$SourceCount of context '$ContextName' has no type definition" );
+      exit 2;
+    }
+    if( ! $Content )
+    {
+      $Logger->fatal( "Source #$SourceCount of context '$ContextName' has no content" );
+      exit 2;
+    }
+    $Source->{type}    = $Type;
+    $Source->{content} = $Content;
+    push( @{$Contexts->{$ContextName}->{subsets}} , $Source );
+  }
+  $Logger->info( "Context #$ContextCount '$ContextName' has $SourceCount sources" );
+  # Read subset definitions }}}
+
+  # Store foreign key relations {{{
+  my $ForeignKeyCount = 0;
+  my @ForeignKeyNodes = $ContextNode->findnodes( qq{foreignkey} );
+  my $ForeignKeys = {};
+  my @SourceFields = ();
+  for my $ForeignKeyNode ( @ForeignKeyNodes )
+  {
+    $ForeignKeyCount++;
+    my $Target = $ForeignKeyNode->getAttribute( "target" );
+    my $Source = $ForeignKeyNode->to_literal;
+    if( ! $Target )
+    {
+      $Logger->fatal( "Target of foreign key #$ForeignKeyCount undefined" );
+      exit 2;
+    }
+    if( ! $Source )
+    {
+      $Logger->fatal( "Source of foreign key #$ForeignKeyCount undefined" );
+      exit 2;
+    }
+    push( @SourceFields , $Source );
+    $Contexts->{$ContextName}->{foreignkeys}->{$Source} = $Target;
+  }
+  my $RegexString = join( "|" , @SourceFields );
+  my $Regex = qr{\01($RegexString)(\d+)};
+  $Contexts->{$ContextName}->{foreignkeysregex} = $Regex;
+  $Logger->info( "Context #$ContextCount '$ContextName' has $ForeignKeyCount foreign keys defined" );
+  # Store foreign key relations }}}
+#  my @Citations = map{$_->to_literal} $ContextNode->findnodes( qq{citations/field} );
+#  my $Citations = scalar @Citations;
+#  $Contexts->{$ContextName}->{citations} = \@Citations;
+#  $Logger->debug( "Context #$ContextCount '$ContextName' has $Citations citation fields" );
+
+#  my @Facts = map{$_->to_literal} $ContextNode->findnodes( qq{facts/field} );
+#  my $Facts = scalar @Facts;
+#  $Contexts->{$ContextName}->{citations} = \@Facts;
+#  $Logger->debug( "Context #$ContextCount '$ContextName' has $Facts facts fields" );
+
+  # Read output limits {{{
+  my $ContextLimitedBy = $ContextNode->findvalue( "output/limited-by" ) || $OutLimitedBy;
+  my $ContextLimit     = $ContextNode->findvalue( "output/limit" ) || $OutLimit;
+
+  if( $ContextLimitedBy && $ContextLimitedBy !~ m{^unlimited|size|record$} )
+  {
+    $Logger->info( "Output file limitation for context $ContextName must be one of 'unlimited', 'size' and 'record'" );
+    exit 2;
+  }
+  if( ! defined $ContextLimit && $ContextLimitedBy =~ m{^size|record$} )
+  {
+    $Logger->info( "Output file limit for context $ContextName must be defined for 'size' and 'record'" );
+    exit 2;
+  }
+  $Contexts->{$ContextName}->{outlimitedby} = $ContextLimitedBy;
+  $Contexts->{$ContextName}->{outlimit} = $ContextLimit;
+  # Read output limits }}}
+
+  $Logger->info( "Parsed definition of context '$ContextName'" );
+}
+$Logger->info( "Config XML parsed" );
+# Parse configuration XML }}}
+
+# Prepare database related stuff {{{
+
+# Connect to database {{{
+my $Dsn = "dbi:SQLite:dbname=$Database";
+my $Dbh = DBI->connect( $Dsn , "" , ""  , { LongReadLen => 10240*10240 , LongTruncOk => 1 , AutoCommit => 0 , RaiseError => 0 , PrintError => 0 } ) or croak( "$DBI::errstr" );
+if( ! $Dbh )
+{
+  $Logger->fatal( "Cannot connect to database" );
+  exit 2;
+}
+$Logger->info( "Database $Database prepared" );
+# Connect to database }}}
+
+# Set up tracking table {{{
+
+# Create tracking table {{{
+$Dbh->prepare( "create table if not exists $TrackingTable ( context varchar , type varchar , stamp number )" )->execute;
+my $SthInsertTracking = $Dbh->prepare( "insert into $TrackingTable values( ? , ? , ? )" );
+my $SthDeleteTracking = $Dbh->prepare( "delete from $TrackingTable where context = ? and type = ? " );
+# Create tracking table }}}
+
+# Clear tracking table if required {{{
+if( $Purge )
+{
+  $Dbh->prepare( "delete from $TrackingTable" )->execute;
+  $Logger->info( "Cleared table $TrackingTable because recreation was requested" );
+}
+# Clear tracking table if required }}}
+
+# Get (sample) snapshot of tracking table {{{
+my $SthCheckTracking = $Dbh->prepare( "select context , stamp from $TrackingTable where type = 'table' " );
+$SthCheckTracking->execute;
+my $SamplesPresent = {};
+while( my @Row = $SthCheckTracking->fetchrow_array )
+{
+  $SamplesPresent->{$Row[0]} = $Row[1];
+}
+# Get (sample) snapshot of tracking table }}}
+
+# Get (file) snapshot of tracking table {{{
+my $SthCheckTracking2 = $Dbh->prepare( "select context , stamp from $TrackingTable where type = 'file' " );
+$SthCheckTracking2->execute;
+my $FilesPresent = {};
+while( my @Row = $SthCheckTracking2->fetchrow_array )
+{
+  $FilesPresent->{$Row[0]} = $Row[1];
+}
+# Get (file) snapshot of tracking table }}}
+
+$Logger->info( "Prepared table $TrackingTable" );
+# Set up tracking table }}}
+
+# Prepare statements for sample tables {{{
+for my $Context ( sort keys %$Contexts )
+{
+  $Logger->info( "Preparing sample table for context $Context" );
+
+  my $SampleTableName = $Contexts->{$Context}->{sampletable};
+
+  $Dbh->prepare( "create table if not exists $SampleTableName ( id number primary key )" )->execute;
+  $Logger->info( "Created sample table $SampleTableName" );
+
+  my $Sth = $Dbh->prepare( "insert into $SampleTableName( id ) values( ? )" );
+  $Contexts->{$Context}->{insert} = $Sth;
+}
+# Prepare statements for sample tables }}}
+
+$Dbh->commit;
+# Prepare database related stuff }}}
+
+# Create tables holding the sample ids for all contexts {{{
+my $SampleStartTimeStamp = gettimeofday;
+for my $Context ( sort{ $Contexts->{$a}->{order} <=> $Contexts->{$b}->{order} } keys %$Contexts )
+{
+  my $StartTimeStamp = gettimeofday;
+  my $SampleTableName = $Contexts->{$Context}->{sampletable};
+
+  if( $SamplesPresent->{$Context} )
+  {
+    $Logger->info( "Sample for context $Context has already been created - no need to re-create it" );
+    next;
+  }
+  $Dbh->prepare( "delete from $SampleTableName" )->execute;
+  $Logger->debug( "Removed content of $SampleTableName" );
+
+  $Logger->info( "Creating sample set for context $Context" );
+
+  # Fill table with data
+  for my $Subset ( @{$Contexts->{$Context}->{subsets}} )
+  {
+    my $Type = $Subset->{type};
+    my $Content = $Subset->{content};
+
+    if( $Type =~ /^relative$/i )
+    {
+      my $StartTimeStamp = gettimeofday;
+      loadRelative( $Context , $Content );
+      my $Elapsed = gettimeofday - $StartTimeStamp;
+      $Logger->debug( sprintf( "Subset loading took %.2f seconds" , $Elapsed ) );
+    }
+    elsif( $Type =~ /^absolute$/i )
+    {
+      my $StartTimeStamp = gettimeofday;
+      loadAbsolute( $Context , $Content );
+      my $Elapsed = gettimeofday - $StartTimeStamp;
+      $Logger->debug( sprintf( "Subset loading took %.2f seconds" , $Elapsed ) );
+    }
+    elsif( $Type =~ /^file$/i )
+    {
+      my $StartTimeStamp = gettimeofday;
+      loadFile( $Context , $Content );
+      my $Elapsed = gettimeofday - $StartTimeStamp;
+      $Logger->debug( sprintf( "File loading took %.2f seconds" , $Elapsed ) );
+    }
+    else
+    {
+      $Logger->error( "Cannot handle subset type '$Type'" );
+      exit 2;
+    }
+    $Logger->debug( "Loaded data into $SampleTableName" );
+  }
+
+  # Mark table as sample already been taken
+  my $Stamp = time;
+  $SthInsertTracking->execute( $Context , 'table' , $Stamp );
+  $SamplesPresent->{$Context} = $Stamp;
+  $SthDeleteTracking->execute( $Context , 'file' );
+  $FilesPresent->{$Context}   = 0;
+
+  $Dbh->commit;
+
+  my $Rows = getCount( $SampleTableName );
+  $Logger->info( "Sample table has $Rows rows" );
+
+  my $Elapsed = gettimeofday - $StartTimeStamp;
+  $Logger->info( sprintf( "Sample data creation for $Context took %.2f seconds" , $Elapsed ) );
+}
+
+my $SampleElapsed = gettimeofday - $SampleStartTimeStamp;
+$Logger->info( sprintf( "Loading sample data for all contexts took %.2f seconds" , $SampleElapsed ) );
+# Create tables holding the sample ids for all contexts }}}
+
+# Extract data from files {{{
+my $ExtractStartTimeStamp = gettimeofday;
+for my $Context ( sort{ $Contexts->{$a}->{order} <=> $Contexts->{$b}->{order} } keys %$Contexts )
+{
+  my $StartTimeStamp = gettimeofday;
+
+  $Logger->info( "Extracting sample for context $Context" );
+
+  # Initialization {{{
+  my $InHandles        = {};
+  my $OutFileSize      = 0;
+  my $OutFileRecords   = 0;
+  my $OutFileCount     = -1;
+  my $OutFileName      = undef;
+  my $OutHandle        = undef;
+  my $ContextOutFile   = $Contexts->{$Context}->{outfile};
+  my $ContextOutDir    = $Contexts->{$Context}->{outdir};
+  my $LimitedBy        = $Contexts->{$Context}->{outlimitedby};
+  my $Limit            = $Contexts->{$Context}->{outlimit};
+  my $RefAdded         = {};
+  my $Regex            = $Contexts->{$Context}->{foreignkeysregex};
+  my $SampleTableName  = $Contexts->{$Context}->{sampletable};
+  my $IndexTableName   = $Contexts->{$Context}->{indextable};
+  my $TableStamp       = $SamplesPresent->{$Context};
+  my $FileStamp        = $FilesPresent->{$Context} || 0;
+  # Initialization }}}
+
+  if( $Delete )
+  {
+    $Logger->info( "Output files requested to be re-created" );
+  }
+  elsif( $TableStamp <= $FileStamp )
+  {
+    $Logger->info( "Output files for $Context are up to date" );
+    next;
+  }
+  else
+  {
+    $Logger->info( "Output files for $Context are outdated or do not exist - re-creating them" );
+  }
+  my $ContextFilePattern = catfile( $ContextOutDir , "$Context*.xf" );
+  my $Deleted = unlink( glob $ContextFilePattern );
+  if( $Deleted )
+  {
+    $Logger->info( "Deleted $Deleted outdated files" );
+  }
+
+  my $Rows = getCount( $SampleTableName );
+  $Logger->info( "Sample table has $Rows rows" );
+
+  my $Sql = "select i.id,i.position,f.filename from $IndexTableName i , $SampleTableName s , $FilesTable f where i.id = s.id and i.fileid = f.id order by i.id";
+  $Logger->trace( $Sql );
+  my $Sth = $Dbh->prepare( $Sql );
+  $Sth->execute;
+
+  while( my( $Id , $Position , $Filename ) = $Sth->fetchrow_array )
+  {
+    #$Logger->trace( "$Id $Position $Filename" );
+    my $Handle = $InHandles->{$Filename};
+    if( ! $Handle )
+    {
+      if( ! open( $Handle , "<" , $Filename ) )
+      {
+        $Logger->error( "Cannot open input file $Filename: $!" );
+        exit 2;
+      }
+      $InHandles->{$Filename} = $Handle;
+    }
+
+    seek( $Handle , $Position , 0 );
+    local $/ = "\02";
+    my $Record = <$Handle>;
+    my $RecordLength = length $Record;
+
+    # Extract references to other contexts {{{
+    if( $References )
+    {
+      my @PairList = ( $Record =~ m{$Regex}g );
+      while( @PairList )
+      {
+        my( $Field , $Value ) = splice( @PairList , 0 , 2 );
+        my $Target = $Contexts->{$Context}->{foreignkeys}->{$Field};
+        if( ! $Target )
+        {
+          $Logger->error( "Target context for field $Field not defined" );
+          exit 2;
+        }
+        my $Handle = $Contexts->{$Target}->{insert};
+        if( ! $Handle )
+        {
+          $Logger->error( "Insert statement for target context $Target not defined" );
+          exit 2;
+        }
+        $Handle->execute( $Value );
+      }
+    }
+    # Extract references to other contexts }}}
+
+    # Close output files if needed {{{
+    if( $LimitedBy eq "size" )
+    {
+      my $EstimatedSize = $OutFileSize + $RecordLength; 
+      if( $EstimatedSize > $Limit && $OutFileRecords != 0 )
+      {
+        if( $OutHandle )
+        {
+          close( $OutHandle );
+          $Logger->info( "Closed output file $OutFileName because next record would not fit into it" );
+          $OutFileName = undef;
+          $OutHandle = undef;
+        }
+      }
+    }
+    elsif( $LimitedBy eq "record" )
+    {
+      if( $OutFileRecords > $Limit )
+      {
+        if( $OutHandle )
+        {
+          close( $OutHandle );
+          $Logger->info( "Closed output file $OutFileName because maximum number of records have been reached" );
+          $OutFileName = undef;
+          $OutHandle = undef;
+        }
+      }
+    }
+    else
+    {
+      $Logger->error( "Unsupported or undefined limit type $LimitedBy" );
+      exit( 1 );
+    }
+    # Close output files if needed }}}
+
+    #$Logger->trace( "$LimitedBy $Limit $OutFileSize $OutFileRecords" );
+
+    # Open output file {{{
+    if( ! defined $OutHandle )
+    {
+      $OutFileCount++;
+      ( $OutHandle , $OutFileName ) = openOut( $ContextOutDir , $ContextOutFile , $Context , $OutFileCount );
+      $OutFileSize    = 0;
+      $OutFileRecords = 0;
+      $Logger->info( "Opened output file '$OutFileName'" );
+    }
+    # Open output file }}}
+
+    # Dump record {{{
+    $OutFileSize = $OutFileSize + $RecordLength;
+    $OutFileRecords++;
+    my $PrintResult = print $OutHandle $Record;
+    if( ! $PrintResult )
+    {
+      $Logger->error( "Error wrint to $OutFileName: $!" );
+      exit( 1 );
+    }
+    # Dump record }}}
+  }
+
+  my $Stamp = time;
+  $SthInsertTracking->execute( $Context , 'file' , $Stamp );
+
+  $Dbh->commit;
+
+  if( $OutHandle )
+  {
+    close( $OutHandle );
+    $Logger->info( "Closed output file $OutFileName" );
+  }
+
+  my $Elapsed = gettimeofday - $StartTimeStamp;
+  $Logger->info( sprintf( "Extracting sample data for $Context took %.2f seconds" , $Elapsed ) );
+}
+my $ExtractElapsed = gettimeofday - $ExtractStartTimeStamp;
+$Logger->info( sprintf( "Extracting sample data for all contexts took %.2f seconds" , $ExtractElapsed ) );
+# Extract data from files }}}
+
+# Payload }}}
+
+# End & exit {{{
+exit( $TotalErrors );
+# End & exit }}}
+
+# END {{{
+END
+{
+  if( $Dbh )
+  {
+    $Dbh->rollback;
+    $Dbh = undef;
+  }
+
+  $MainLogger->info( "END $? $CommandLine" ) if $MainLogger;
+
+  if( $TotalErrors )
+  {
+    $Logger->info( "There were $TotalErrors errors" );
+  }
+  else
+  {
+    $Logger->info( "There were no errors" );
+  }
+
+  my $Elapsed = gettimeofday - $STS;
+  $Logger->info( sprintf( "Execution time was %.2f seconds" , $Elapsed ) );
+
+  $Logger->info( "$MyName $Version ended" );
+}
+# END }}}
+
+# getCount {{{
+sub getCount
+{
+  my $Table = shift;
+
+  my $Sql = "select count(*) from $Table";
+  my $Sth = $Dbh->prepare( $Sql );
+  $Sth->execute();
+  my $Count = $Sth->fetchrow_array;
+  $Count;
+}
+# getCount }}}
+
+# loadRelative {{{
+sub loadRelative
+{
+  my $Context = shift;
+  my $Percent = shift;
+
+  if( $Percent <= 0 || $Percent >= 100 )
+  {
+    $Logger->error( "Percent value $Percent out of range" );
+    exit( 1 );
+  }
+
+  my $IndexTableName  = $Contexts->{$Context}->{indextable};
+
+  my $Count = getCount( $IndexTableName );
+  $Logger->trace( "Index table $IndexTableName has $Count entries" );
+
+  my $Absolute = sprintf( "%d" , $Count*$Percent/100.0 );
+  $Logger->trace( "$Percent% are equivalent to $Absolute entries" );
+
+  loadAbsolute( $Context , $Absolute );
+}
+# loadRelative }}}
+
+# loadAbsolute {{{
+sub loadAbsolute
+{
+  my $Context  = shift;
+  my $Absolute = shift;
+
+  my $IndexTableName  = $Contexts->{$Context}->{indextable};
+  my $SampleTableName = $Contexts->{$Context}->{sampletable};
+
+  my $Sql = "insert into $SampleTableName select id from $IndexTableName where id in (select id from $IndexTableName order by random() limit $Absolute )";
+  $Logger->trace( "SQL: $Sql" );
+  my $Sth = $Dbh->prepare( $Sql );
+  $Sth->execute;
+  $Logger->trace( "Inserted data into $SampleTableName" );
+}
+# loadAbsolute }}}
+
+# loadFile {{{
+sub loadFile
+{
+  my $Context = shift;
+  my $File    = shift;
+
+  my $SampleTableName = $Contexts->{$Context}->{sampletable};
+
+  my $Sth = $Contexts->{$Context}->{insert};
+
+  if( ! open( F , "<" , $File ) )
+  {
+    $Logger->error( "Cannot open input file $File: $!" );
+    exit 2;
+  }
+  my $l = 0;
+  while( <F> )
+  {
+    $l++;
+    chomp;
+
+    s{\s}{}g;
+    next if ! $_;
+    if( ! /^\d+$/ )
+    {
+      $Logger->error( "Line $l in file $File contains non-numerical data: $_" );
+      exit( 1 );
+    }
+    $Sth->execute( $_ );
+  }
+  close( F );
+  $Dbh->commit;
+
+
+  $Logger->trace( "Inserted data into $SampleTableName" );
+}
+# loadFile }}}
+
+# openOut {{{
+sub openOut
+{
+  my $Dir     = shift;
+  my $Pattern = shift;
+  my $Context = shift;
+  my $Nr      = shift;
+
+  my $ShortName = sprintf( $Pattern , $Context , $Nr );
+  my $OutFileName = catfile( $Dir , $ShortName );
+  $Logger->trace( "Next output file will be '$OutFileName'" );
+
+  if( -s $OutFileName )
+  {
+    if( ! $Overwrite )
+    {
+      $Logger->error( "Output file '$OutFileName' already exists - won't overwrite it" );
+      exit( 1 );
+    }
+    $Logger->info( "Output file '$OutFileName' already exists - overwriting it" );
+  }
+
+  $Logger->trace( "Opening output file '$OutFileName'" );
+  my $Handle;
+  if( ! open( $Handle , ">" , $OutFileName ) )
+  {
+    $Logger->error( "Output file '$OutFileName' cannot be opened: $!" );
+    exit( 1 );
+  }
+
+  ( $Handle , $OutFileName );
+}
+# openOut }}}
+
+1;
+
+__END__
+
+
+   -config <file>     config file
+   -delete            delete outputfiles
+   -help              brief help
+   -logconf <file>    log conf file
+   -man               full documentation
+   -outdir <dir>      output directory
+   -purge             purge everything
+   -references        resolve references
+   -sample <string>   sample marker
+   -version           print version and exit
+ 
+=head1 OPTIONS
+ 
+=over 4
+ 
+=item B<-config file>
+ 
+The name of the configuration file describing the data structure and the sample.
+This is required.
+ 
+=item B<-delete>
+ 
+If given the output files are re-created regardless if they exist or not.
+Turned off by default.
+ 
+=item B<-help>
+ 
+Print a brief help message and exits.
+ 
+=item B<-logconf file>
+ 
+The full path to a log configuration file for Log4Perl.
+ 
+=item B<-man>
+ 
+Prints the manual page and exits.
+ 
+=item B<-outdir dir>
+ 
+Gives the output directory. If omitted the output directory from the configuration
+XML is used.
+ 
+=item B<-purge>
+ 
+Controls whether to purge the possibly existing sample tables. Default is off.
+ 
+=item B<-reference>
+ 
+Controls if the output data is referential integer. True by default.
+ 
+=item B<-sample string>
+ 
+Gives a string which is used as prefix for sample tables in the database. Defaults
+to sample.
+ 
+=item B<-version>
+ 
+Prints the version and exits.
+ 
+=back
+ 
+=head1 DESCRIPTION
+ 
+B<This program> extracts a sample set from an existing crossfie data set.
+
+It scans all contexts which are marked as to be exported, creates a sample and
+extract the sample into new files. All parameters are controlled by the XML file,
+see section CONFIGURATION for details how to configure.
+
+The first phase of the program is the startup phase. In this phase, it parses the command
+line sets some defaults, checks parameters for consistency, initializes logging, etc.
+
+The next phase is the scanning of the configuration XML. A lot of parameters are read and
+stored internally for later use. Detailed description can be found in CONFIGURATION section.
+
+Next the program connects to the database. The database definition is taken from 
+configuration XML. The purpose of this database is twofold: Firstly, it has to contains the
+index tables belonging to the source files. Those index tables are created by
+B<xf-create-index>. The tables named "*index" and "files" are part of this database
+so, do not touch or delete them! The outher purpose is to store temporary data
+required for extraction. Those typically controlled by the program so there should
+by no need for manual interaction with the database.
+
+After all the preparation steps the next step is to create sample tables. This is done by
+looping over each table which will is part of the sample as defined in configuration
+XML. 
+
+For each table a table named "<context>sample" is created which holds exactly one column,
+the primary key of the records. There are three ways to add data to this table:
+By loading a relative sample into it (ranging from 0 to 100 percent of the source data)
+or by loading an absolute sample into it (the absolute numbers of records taken from
+source data) both selected ranodomly. The third was is to provide a file which a number
+for a context which contains a record ID in each line. The file content is then loaded.
+All those three data sources may be absent or given one or more times. This is especially
+useful when loading reacords defined in different files or mixing randomly selected
+with manually selected data.
+The IDs of the table are deduplicated, of course, to avoid duplicate records in the output data set.
+Once all data has been loaded in the table an entry in the tracking table is generated
+marking the context as being processed. If the job is running with same parametrization
+again the sample will not be re-generated.
+
+After the tables with sample IDs have been generated for each context. Next step is to extract
+the required records from the source data set and write them to the target data set.
+This is again done by looping over each context but here the context need to be processed
+in a given order. The order is rea, dat, mtb, com, mea, trg, ass, pro, fct, cit.
+The reason why the processing is done in order is the reference resolvment. If for
+example rea is processed all references to all other contexts from rea are collected
+and the IDs are added to the sample tables of those contexts. For rea there is
+the reference BZ0 pointing to citation context and all numbers found in BZ0 are added
+to citation sample table. By following this procedure the resultiung sample set
+is referential integer in a sense that all references can be resolved.
+However, there are two exceptions of references which won't be resolved: Any reference
+to a taxonomy will not be included and any reference pointing to the same context
+are ignored as well. The latter affects only the references from fct context to itself defined
+by the fields IDR and PS2 and there self reference in dat by field DPM.
+
+Once a dataset of a specific context has been dumped an entry is generated marking this context
+as dumped so it won't be dumped again unless this is explicitely requested or sample table
+is re-created.
+
+=head1 CONFIGURATION
+
+This is a very essential part, so read it carefully! Before we go into details it has to
+be made clear that the configuration file serves two needs:
+
+=over 4
+
+=item - 
+
+Defining the dependencies between contexts. Those should not be touched by the user at all.
+
+=item - 
+
+Defining the output sample set. This is subject to be chjanged by the user.
+
+=back
+
+=head2 Definition Section
+
+This section defines the definition of the contexts in the configuration XML. The definitions
+are stored as child nodes of C</sample/contexts>. Each context is represented by a subnode
+named C<context>. This subnode must have two attributes:
+
+=over 4
+
+=item name
+
+The name of the context. One of C<rea>, C<dat>, C<mtb>, C<com>, C<mea>, C<trg>, C<ass>,
+C<pro>, C<fct>, and C<cit>. The order of the definition of the contexts is irrelevant.
+
+=item order
+
+The order in which the contexts are processed. This should be numeric and the contexts
+will be processed in ascending order. Do not change the order unless you know exactly what
+you are doing.
+
+The program has been designed because of performance issues in a way to scan the input
+files only once. Whenever a reference to a context is read that has not been processed
+the id is just added to the sample set of the target context and it will be dumped
+when the target context is being processed. But if the target context already has been
+processed the record of the ID cannot be dumped anymore.
+
+=back
+
+In each context node there are defintions of the C<primarykey> and C<foreignkey>. While
+the C<primarykey> is always present - as each context must have a primary key - it is
+not used by the sample file generator. This definition is only present for completeness
+and may be used by future versions of the indexer that needs this information.
+
+The C<foreignkey> definition is very important. It may be absent as for context C<cit> or
+C<pro> or multiple as for C<rea> or C<dat>. Only the self references are omitted as mentioned
+above. When scanning the configuration a regular expression is created which - if applied 
+to a record of the context - extracts all references with a single scan.
+
+All foreign keys are simply added to the sample of the target database. This may lead to
+a drastic increase of the sample set size. For example if requesting a referential integer
+dump with 2000 records of each contexts typically results in about 15000 citations instead of
+requested 2000.
+ 
+=head2 Sample Section
+
+This section controls the sample dataset creation. As said above it mixes up with the
+Definition Section but this may be changed in future.
+
+There are two types of definitions, the general and default definitions in the head 
+of the XML file and the context specific definitions.
+
+=head3 Header Definition
+
+This contains some important and fundamental settings. They are:
+
+=over 4
+
+=item C</sample/database>
+
+The valid path to the SQLite database. Required.
+
+=item C</sample/output/dir>
+
+The valid path to the output directory. Will be created if not existent. Required.
+
+=item C</sample/output/file>
+
+The output file pattern. Since the output file may be multiple, see below, this pattern
+is used to create output file names. When the utput file name is generated the printf
+statement gets two argument, context name and file number within this context. A pattern
+C<%s%02d.xf> would result for context C<rea> in C<rea00.xf>, C<rea01.xf>, C<rea02.xf> etc.
+
+=item C</sample/output/limited-by>
+
+The output file limititation type. This has three different possible values:
+
+=over 4
+
+=item C<unlimited>
+
+This results in an unlimited single output file. May be dangerous if the requested subset
+is too large because the output files may hit file system limits. 
+
+=item C<record>
+
+If this limit type is selected the output file is limited by the number of records. It
+requires C<limit> to be set as well to a valid value. The program switches to next output
+file when the current output file has reached the maximum number of output records.
+
+=item C<size>
+
+Typically, the record size vary drastically in terms of size and often it might be more
+useful to limit the output file by maximum size. If the current record would lead to
+an overflow in terms of given file size the current ouput file is cloes an a new one is
+opened. This ensures that the given file size is never exceeded. 
+
+There is one exception, of course: If the target file size is so small that not even one
+record would fit in the record is still written to the file even though it will exceed the
+defined file size.
+
+=back
+
+This definition is the default for the same definitions on context level.
+
+=item C</sample/output/limit>
+
+The output file limit. For limitation type C<unlimited> the value has no effect.
+For limitation type C<record> defines the maximum number of records per output
+file and for C<size> the maximum file size in bytes.
+
+=back
+
+=head3 Context Specific Definition
+
+On context level there are two relevant nodes, C<output> and C<subset>.
+
+C<output> allows to override the limitation type and limit. The parametrization is the same
+as in header section. Please note that output directory and output file pattern may not be
+changed on context level.
+
+The node C<subset> defines how the subset is created. If must contain at least 1 subnode
+named C<source> but may contain more than one. There are three different kind of sources
+currently supported:
+
+=over 4
+
+=item absolute
+
+A source node of type absolute has the following definition:
+
+C<< <source type="absolute">2000</source> >>
+
+This defines that for this source 2000 records of the source context will be randomly selected
+and added to the sample set.
+
+=item relative
+
+A source node of type relative has the following definition:
+
+C<< <source type="relative">5</source> >>
+
+This defines that for this source 5% of the data of the source context will be included
+in the sample output set. The number given must be between 0 and 100, of course.
+
+=item file
+
+A source node of type file has the following definition:
+
+C<< <source type="file">idlist.txt</source> >>
+
+This defines that for this source the all IDs defined in file C<idlist.txt> will be added
+to the sample. The file must be a simple text file and each line in the text file must contain
+a single number. Empty lines are ignored.
+in the sample output set. The number given must be between 0 and 100, of course.
+
+=back
+
+=head1 CAVEATS
+
+=over 4
+
+=item *
+
+This program is designed to dump only small subsets. Larger subsets can be processed as
+well but this is not the fastest solution because the program is written in Perl.
+
+=item *
+
+If two sources or more for a single context are used there may be an overlap in the IDs. So
+dumping 2 absolute sources of 2000 ID may result in less thann 4000 records.
+
+=item *
+
+A 2K sample for each of the 10 contexts results in 53K (850MB) records in the dump and takes about
+420 seconds. A 10K sample results in 242K (2GB) records and takes about 460 seconds to execute.
+A 100K sample results in 2000K (7GB) records and takes about 690 seconds to execute.
+
+=back
+ 
+=head1 EXAMPLES
+ 
+Create sample as defined in file C<sample-config.xml> (see below).
+
+$ zwf-sample -c sample-config.xml
+
+This takes about 7 minutes to run and extracts about 53000 records of 10 contexts.
+Repeating the same command does nothing and ends after a few milliseconds because
+the program recoginzes that nothing has changed an no new dump is required.
+
+$ zwf-sample -c sample-config.xml -p
+
+This runs the program again but purges the tracking and sample tables before it runs.
+Consequently, the selection will be made again resulting in similar results as the first
+run.
+
+$ zwf-sample -c sample-config.xml -d
+
+This runs the program, keeps the sample table but deletespossibly existing
+output files. This results in a fresh dump of the same data based on the same sample
+data set. Takes in this configuration about 2 minutes and 30 seconds.
+
+$ zwf-sample -c sample-config.xml -d -noreferences
+
+The same as before but does not include reference resolvement. Reference resolvement
+is required only once and not needed in subsequent calls. This should be faster but
+in reality seems to have no big effect on execution time.
+
+=head1 TODO
+ 
+=over 4
+
+=item - 
+
+Separate configuration file into two. One describing the relations and is not required to
+be changed at all and one describing the subset to be extracted.
+
+This makes sense from a logical perspective and minimizes the risk of corrupting the
+description of relations.
+
+=item - 
+
+Use another DB rather than SQLite. This would allow to separate clearly between indexing tables
+which are read only for this program and should never been altered and the sample tables
+
+While switching to another database should be more or less transparent and easy there is
+some room for performance improvement by parallel processing but this would would require
+fundamental refactoring of the code.
+
+=back
+
+=head1 SAMPLE CONFIGURATION FILE
+
+=begin text
+
+<sample>
+  <database>xfindex-database.sqlite3</database>
+  <output>
+    <dir>xf211501d-sample</dir>
+    <file>%s%02d.xf</file>
+    <limited-by>unlimited</limited-by>
+    <limit></limit>
+  </output>
+  <contexts>
+    <context name="rea" order="10">
+      <primarykey>BL1</primarykey>
+      <foreignkey target="cit">BZ0</foreignkey>
+      <foreignkey target="fct">BL4</foreignkey>
+      <foreignkey target="fct">BL2</foreignkey>
+      <foreignkey target="fct">BLL</foreignkey>
+      <foreignkey target="fct">BLA</foreignkey>
+      <foreignkey target="fct">BLB</foreignkey>
+      <foreignkey target="fct">BLC</foreignkey>
+      <foreignkey target="fct">BZK</foreignkey>
+      <foreignkey target="fct">BZL</foreignkey>
+      <foreignkey target="fct">BZS</foreignkey>
+      <foreignkey target="fct">BLZ</foreignkey>
+      <foreignkey target="fct">BLX</foreignkey>
+      <subset>
+        <source type="absolute">2000</source>
+      </subset>
+      <output>
+        <limited-by>record</limited-by>
+        <limit>1000</limit>
+      </output>
+    </context>
+    <context name="dat" order="20">
+      <primarykey>DP1</primarykey>
+      <foreignkey target="cit">DP0</foreignkey>
+      <foreignkey target="fct">DP2</foreignkey>
+      <foreignkey target="mea">DP5</foreignkey>
+      <foreignkey target="ass">DP6</foreignkey>
+      <foreignkey target="trg">DPD</foreignkey>
+      <foreignkey target="dat">DPM</foreignkey>
+      <subset>
+        <source type="absolute">2000</source>
+      </subset>
+      <output>
+        <limited-by>record</limited-by>
+        <limit>1000</limit>
+      </output>
+    </context>
+    <context name="mtb" order="30">
+      <primarykey>ME1</primarykey>
+      <foreignkey target="cit">ME0</foreignkey>
+      <foreignkey target="fct">ME3</foreignkey>
+      <foreignkey target="fct">ME5</foreignkey>
+      <foreignkey target="mea">ME2</foreignkey>
+      <subset>
+        <source type="absolute">2000</source>
+      </subset>
+      <output>
+        <limited-by>record</limited-by>
+        <limit>1000</limit>
+      </output>
+    </context>
+    <context name="com" order="40">
+      <primarykey>CT1</primarykey>
+      <foreignkey target="cit">CT0</foreignkey>
+      <foreignkey target="fct">CT3</foreignkey>
+      <foreignkey target="ass">CT2</foreignkey>
+      <subset>
+        <source type="absolute">2000</source>
+      </subset>
+      <output>
+        <limited-by>record</limited-by>
+        <limit>1000</limit>
+      </output>
+    </context>
+    <context name="mea" order="50">
+      <primarykey>MS1</primarykey>
+      <foreignkey target="cit">MS0</foreignkey>
+      <foreignkey target="ass">MS2</foreignkey>
+      <subset>
+        <source type="absolute">2000</source>
+      </subset>
+      <output>
+        <limited-by>record</limited-by>
+        <limit>1000</limit>
+      </output>
+    </context>
+    <context name="trg" order="60">
+      <primarykey>TA1</primarykey>
+      <foreignkey target="cit">TA0</foreignkey>
+      <foreignkey target="ass">TA2</foreignkey>
+      <foreignkey target="pro">SNB</foreignkey>
+      <subset>
+        <source type="absolute">2000</source>
+      </subset>
+      <output>
+        <limited-by>record</limited-by>
+        <limit>1000</limit>
+      </output>
+    </context>
+    <context name="ass" order="70">
+      <primarykey>AS1</primarykey>
+      <foreignkey target="cit">AS0</foreignkey>
+      <subset>
+        <source type="absolute">2000</source>
+      </subset>
+      <output>
+        <limited-by>record</limited-by>
+        <limit>1000</limit>
+      </output>
+    </context>
+    <context name="pro" order="80">
+      <primarykey>PR1</primarykey>
+      <subset>
+        <source type="absolute">500</source>
+      </subset>
+      <output>
+        <limited-by>record</limited-by>
+        <limit>1000</limit>
+      </output>
+    </context>
+    <context name="fct" order="90">
+      <primarykey>ID1</primarykey>
+      <foreignkey target="cit">Z9A</foreignkey>
+      <subset>
+        <source type="absolute">2000</source>
+      </subset>
+      <output>
+        <limited-by>record</limited-by>
+        <limit>1000</limit>
+      </output>
+    </context>
+    <context name="cit" order="100">
+      <primarykey>R1_</primarykey>
+      <subset>
+        <source type="absolute">2000</source>
+      </subset>
+      <output>
+        <limited-by>record</limited-by>
+        <limit>1000</limit>
+      </output>
+    </context>
+  </contexts>
+</sample>
+
+=end text
+ 
+=cut

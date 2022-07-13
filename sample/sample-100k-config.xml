@@ -1,0 +1,143 @@
+<sample>
+  <database>xfindex-100k-database.sqlite3</database>
+  <output>
+    <dir>xf211501d-sample-100k</dir>
+    <file>%s%03d.xf</file>
+    <limited-by>unlimited</limited-by>
+    <limit></limit>
+  </output>
+  <contexts>
+    <context name="rea" order="10">
+      <primarykey>BL1</primarykey>
+      <foreignkey target="cit">BZ0</foreignkey>
+      <foreignkey target="fct">BL4</foreignkey>
+      <foreignkey target="fct">BL2</foreignkey>
+      <foreignkey target="fct">BLL</foreignkey>
+      <foreignkey target="fct">BLA</foreignkey>
+      <foreignkey target="fct">BLB</foreignkey>
+      <foreignkey target="fct">BLC</foreignkey>
+      <foreignkey target="fct">BZK</foreignkey>
+      <foreignkey target="fct">BZL</foreignkey>
+      <foreignkey target="fct">BZS</foreignkey>
+      <foreignkey target="fct">BLZ</foreignkey>
+      <foreignkey target="fct">BLX</foreignkey>
+      <subset>
+        <source type="absolute">100000</source>
+      </subset>
+      <output>
+        <limited-by>size</limited-by>
+        <limit>10000000</limit>
+      </output>
+    </context>
+    <context name="dat" order="20">
+      <primarykey>DP1</primarykey>
+      <foreignkey target="cit">DP0</foreignkey>
+      <foreignkey target="fct">DP2</foreignkey>
+      <foreignkey target="mea">DP5</foreignkey>
+      <foreignkey target="ass">DP6</foreignkey>
+      <foreignkey target="trg">DPD</foreignkey>
+      <foreignkey target="dat">DPM</foreignkey>
+      <subset>
+        <source type="absolute">100000</source>
+      </subset>
+      <output>
+        <limited-by>size</limited-by>
+        <limit>10000000</limit>
+      </output>
+    </context>
+    <context name="mtb" order="30">
+      <primarykey>ME1</primarykey>
+      <foreignkey target="cit">ME0</foreignkey>
+      <foreignkey target="fct">ME3</foreignkey>
+      <foreignkey target="fct">ME5</foreignkey>
+      <foreignkey target="mea">ME2</foreignkey>
+      <subset>
+        <source type="absolute">100000</source>
+      </subset>
+      <output>
+        <limited-by>size</limited-by>
+        <limit>10000000</limit>
+      </output>
+    </context>
+    <context name="com" order="40">
+      <primarykey>CT1</primarykey>
+      <foreignkey target="cit">CT0</foreignkey>
+      <foreignkey target="fct">CT3</foreignkey>
+      <foreignkey target="ass">CT2</foreignkey>
+      <subset>
+        <source type="absolute">100000</source>
+      </subset>
+      <output>
+        <limited-by>size</limited-by>
+        <limit>10000000</limit>
+      </output>
+    </context>
+    <context name="mea" order="50">
+      <primarykey>MS1</primarykey>
+      <foreignkey target="cit">MS0</foreignkey>
+      <foreignkey target="ass">MS2</foreignkey>
+      <subset>
+        <source type="absolute">100000</source>
+      </subset>
+      <output>
+        <limited-by>size</limited-by>
+        <limit>10000000</limit>
+      </output>
+    </context>
+    <context name="trg" order="60">
+      <primarykey>TA1</primarykey>
+      <foreignkey target="cit">TA0</foreignkey>
+      <foreignkey target="ass">TA2</foreignkey>
+      <foreignkey target="pro">SNB</foreignkey>
+      <subset>
+        <source type="absolute">100000</source>
+      </subset>
+      <output>
+        <limited-by>size</limited-by>
+        <limit>10000000</limit>
+      </output>
+    </context>
+    <context name="ass" order="70">
+      <primarykey>AS1</primarykey>
+      <foreignkey target="cit">AS0</foreignkey>
+      <subset>
+        <source type="absolute">100000</source>
+      </subset>
+      <output>
+        <limited-by>size</limited-by>
+        <limit>10000000</limit>
+      </output>
+    </context>
+    <context name="pro" order="80">
+      <primarykey>PR1</primarykey>
+      <subset>
+        <source type="absolute">500</source>
+      </subset>
+      <output>
+        <limited-by>size</limited-by>
+        <limit>10000000</limit>
+      </output>
+    </context>
+    <context name="fct" order="90">
+      <primarykey>ID1</primarykey>
+      <foreignkey target="cit">Z9A</foreignkey>
+      <subset>
+        <source type="absolute">100000</source>
+      </subset>
+      <output>
+        <limited-by>size</limited-by>
+        <limit>100000000</limit>
+      </output>
+    </context>
+    <context name="cit" order="100">
+      <primarykey>R1_</primarykey>
+      <subset>
+        <source type="absolute">100000</source>
+      </subset>
+      <output>
+        <limited-by>size</limited-by>
+        <limit>100000000</limit>
+      </output>
+    </context>
+  </contexts>
+</sample>
