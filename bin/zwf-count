@@ -1,0 +1,14 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use Getopt::Long;
+
+$/ = "\02";
+my $Count = 0;
+
+while( <> )
+{
+  $Count++;
+}
+print "Found $Count records\n";
