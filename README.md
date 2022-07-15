@@ -34,3 +34,25 @@ variables.
 ## ut
 
 The tool `ut` allows to enter an AWS key for AWS access.
+
+## zwf-count
+
+Counts the number of records in the files n ZWF format passed to the tools
+and prints it on command line.
+
+## zwf-create-index
+
+Indexes ZWF files. Please refer to manual page for detailed description.
+
+## zwf-dump
+
+Dumps the ZWF files on the screen by replacing binary characters with non-binary.
+
+## zwf-extract-index
+
+Extracts data from indexed ZWF files. Currently broken. Please use zwf-sample instead.
+
+## zwf-sample
+
+Extracts a referential integer subset of given ZWF file set. Please refer to manual page
+for detailed description.

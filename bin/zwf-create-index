@@ -4,12 +4,13 @@
 #==============================================================#
 #==============================================================#
 #
-# Version: 1.0.0
-# Updated: 2022-02-20
+# Version: 1.0.1
+# Updated: 2022-07-14
 # Author: Helge Kraenz
 #
 # History
 # 1.0.0   Initial    kraenzh
+# 1.0.1   Released   kraenzh
 #
 #==============================================================#
 #==============================================================#
@@ -64,14 +65,14 @@ $Options->{keep}      = 0;
 $Options->{type}      = undef;
 my $TotalErrors = 0;
 my @RemoveFiles = ();
-my $Version = "1.0.0";
+my $Version = "1.0.1";
 my $MyName  = basename( $0 );
 my $MainPid = $$;
 # Variables }}}
 
 # Parse command line {{{
 # ssf-to-xf.pl -bindir $(RBIN) -tempdir $(TEMP) -hierarchies $(TAB) -outdir $(TEMP) -parallel $(PARALLEL) $(TEMP)/*.out
-my $ParseResult = GetOptions( $Options , "field=s" , "help|h" , "keep" , "logconf=s" , "man" , "parallel=i" , "tempdir=s" , "type=s" , "version|V" );
+my $ParseResult = GetOptions( $Options , "config=s" , "field=s" , "help|h" , "keep" , "logconf=s" , "man" , "parallel=i" , "tempdir=s" , "type=s" , "version|V" );
 pod2usage( 1 ) if ! $ParseResult;
 # Parse command line }}}
 
@@ -97,21 +98,30 @@ if( $Options->{version} )
 # Startup {{{
 
 # Abbreviations {{{
-my $Field      = $Options->{field};
+my $ConfigFile = $Options->{config};
 my $TempDir    = rel2abs( $Options->{tempdir} );
 my $Parallel   = $Options->{parallel};
-my $Type       = $Options->{type};
 my @XFs        = @ARGV;
 # Abbreviations }}}
 
 # Startup message {{{
-my $Logger = get_logger( "xf-create-index" );
+my $Logger = get_logger( "zwf-create-index" );
 $Logger = get_logger() if ! $Logger;
 $Logger->info( "$MyName $Version started" );
 $Logger->info( "Call: $CommandLine" );
 # Startup message }}}
 
 # Check parameters {{{
+if( ! $ConfigFile )
+{
+  $Logger->fatal( "Config file unset" );
+  exit( 2 );
+}
+if( ! -s $ConfigFile )
+{
+  $Logger->fatal( "Config file $ConfigFile not found or empty" );
+  exit( 2 );
+}
 if( ! $TempDir )
 {
   $Logger->fatal( "Temp dir unset" );
@@ -143,70 +153,24 @@ my $STS = gettimeofday;
 
 # Payload {{{
 
-my $FieldTypes = 
+# Parse configuration XML {{{
+$Logger->debug( "Parsing config xml '$ConfigFile'" );
+my $Dom = XML::LibXML->load_xml( location => $ConfigFile );
+my $Database = $Dom->findvalue( "/sample/database" );
+if( ! $Database )
 {
-  "R1_" => "cit",
-};
-
-# Determine field if not given {{{
-if( ! $Field )
-{
-  $Type = undef;
-  my $FirstXF = $XFs[0];
-  my $Fin;
-
-  # Open file {{{
-  if( ! open( $Fin , "<" , $FirstXF ) )
-  {
-    $Logger->error( "Cannot open input file $FirstXF" );
-    $Logger->error( "Message: $!" );
-    exit 1;
-  }
-  # Open file }}}
-
-  # Read first record {{{
-  local $/ = "\02";
-  $_ = <$Fin>;
-  ( $Field ) = m{^\01(...)};
-  if( ! $Field )
-  {
-    $Logger->error( "Unable to read field name from $FirstXF - maybe no 3-byte file?" );
-    exit 1;
-  }
-  $Logger->info( "Field name is '$Field'" );
-  # Read first record }}}
-
-  # Close file {{{
-  if( ! close( $Fin ) )
-  {
-    $Logger->error( "Cannot close input file $FirstXF" );
-    $Logger->error( "Message: $!" );
-    exit 1;
-  }
-  # Close file }}}
+  $Logger->fatal( "SQLite database not defined" );
+  exit 2;
 }
-# Determine field if not given }}}
+$Logger->info( "Config XML parsed" );
+# Parse configuration XML }}}
 
-# Determine type if not given {{{
-if( ! $Type )
-{
-  $Type = $FieldTypes->{$Field};
-  $Logger->info( "Type name is '$Type'" );
-}
-# Determine type if not given }}}
-
-# Check if type and field are defined {{{
-if( ! $Type )
-{
-  $Logger->fatal( "Type not defined" );
-  exit( 2 );
-}
-if( ! $Field )
-{
-  $Logger->fatal( "Index field not defined" );
-  exit( 2 );
-}
-# Check if type and field are defined }}}
+# Get context name and primary key {{{
+my $ContextName = substr( basename( $XFs[0] ) , 0 , 3 );
+my $PrimaryKey  = $Dom->findvalue( "/sample/contexts/context[\@name='$ContextName']/primarykey" );
+$Logger->info( "Context is '$ContextName'" );
+$Logger->info( "Primary key is '$PrimaryKey'" );
+# Get context name and primary key }}}
 
 eval{ make_path( $TempDir ); };
 if( ! -d $TempDir )
@@ -219,23 +183,71 @@ $Logger->info( "Directory $TempDir present" );
 # Prework {{{
 
 # Prepare database related stuff {{{
-my $Db = Elsevier::Database->new( xmlfile => "tab/database.xml" , database => "sqlite" , loglevel => $ERROR , pattern => "xfci-" );
-if( ! $Db )
+my $Dsn = "dbi:SQLite:dbname=$Database";
+my $Dbh = DBI->connect( $Dsn , "" , ""  , { LongReadLen => 10240*10240 , LongTruncOk => 1 , AutoCommit => 0 , RaiseError => 1 , PrintError => 0 } ) or croak( "$DBI::errstr" );
+if( ! $Dbh )
 {
   $Logger->fatal( "Cannot connect to database" );
   exit 2;
 }
-$Db->dbh->{RaiseError} = 1;
-# Create database
-if( ! $Db->execute( "xfci-create-table" ) )
+$Logger->info( "Database in $Database prepared" );
+
+my $Sql = undef;
+# XXX
+my $IndexMarker = "index";
+my $FilesTable = "${IndexMarker}_files";
+
+# Create tables {{{
+
+# Create files table {{{
+$Sql = qq{
+      create table if not exists $FilesTable
+      (
+        id integer primary key ,
+        filename varchar( 100 ) default NULL,
+        indexname varchar( 100 ) ,
+        filedate number default 0,
+        indexdate number ,
+        shortname varchar( 20 ) ,
+        type varchar( 20 ) ,
+        build number default 0,
+        fileid number
+      )};
+if( ! $Dbh->prepare( $Sql )->execute )
 {
   $Logger->fatal( "Cannot create table" );
   exit 2;
 }
+# Create files table }}}
 
-my $IndexDb = $Db->dbname;
+# Prepare statement for later use {{{
+$Sql = "insert into $FilesTable (filename,indexname,filedate,indexdate,shortname,type,build,fileid) values ( ? , ? , ? , ? , ? , ? , ? , ? )";
+my $SthSubindexInsert = $Dbh->prepare( $Sql );
 
-$Logger->info( "Database in $IndexDb prepared" );
+$Sql = "delete from $FilesTable where type = ? and filename = ?";
+my $SthSubindexDelete = $Dbh->prepare( $Sql );
+
+$Sql = "select count(*) from $FilesTable where type = ? and shortname = 'main'";
+my $SthGetMainIndex = $Dbh->prepare( $Sql );
+
+$Sql = "select count(*) from $FilesTable  where type = ? and shortname != 'main' and indexdate >= ( select indexdate from $FilesTable where type = ? and shortname = 'main' )";
+my $SthCheckMainIndex = $Dbh->prepare( $Sql );
+
+$Sql = "select id , filename , indexname , shortname , build from $FilesTable where type = ? and shortname != 'main' order by fileid";
+my $SthGetAllSubindexes = $Dbh->prepare( $Sql );
+
+$Sql = "delete from $FilesTable where type = ? and shortname = 'main'";
+my $SthDeleteMainIndex = $Dbh->prepare( $Sql );
+
+$Sql = "update $FilesTable set build = 0 , indexdate = ? where shortname = ?";
+my $SthUpdateSubindex = $Dbh->prepare( $Sql );
+
+$Sql = "insert into $FilesTable (indexname,indexdate,shortname,type,fileid) values ( ? , ? , 'main' , ? , 0 )";
+my $SthInsertMainIndex = $Dbh->prepare( $Sql );
+# Prepare statement for later use }}}
+
+# Create tables }}}
+
 # Prepare database related stuff }}}
 
 # Data for subindexes {{{
@@ -274,10 +286,10 @@ for my $XF ( @XFs )
 
   if( $Build )
   {
-    $Db->execute( "xfci-delete-subindex" , $Type , $Filename );
+    $SthSubindexDelete->execute( $ContextName , $Filename );
     $Logger->trace( "Deleted old entries for $ShortName." );
 
-    $Db->execute( "xfci-insert-subindex" , $Filename , $Indexname , $Filedate , $Indexdate , $ShortName , $Type , $Build , $Count );
+    $SthSubindexInsert->execute( $Filename , $Indexname , $Filedate , $Indexdate , $ShortName , $ContextName , $Build , $Count );
     $Logger->trace( "Injected new entry for $ShortName." );
     $Recreate++;
   }
@@ -297,13 +309,15 @@ else
 # Data for main index {{{
 my $Build = 0;
 
-my $MainIndexExists = $Db->getFirstRow( "xfci-get-main-index" , $Type );
-#my $SthGetFiles     = $Db->execute( "xfci-get-files" , $Type );
-#my $Rows            = $SthGetFiles->fetchall_arrayref;
-my $Rows            = $Db->execute( "xfci-get-all-subindexes" , $Type )->fetchall_arrayref;
+$SthGetMainIndex->execute( $ContextName );
+$SthCheckMainIndex->execute( $ContextName , $ContextName );
+$SthGetAllSubindexes->execute( $ContextName );
+
+my $MainIndexExists = $SthGetMainIndex->fetchrow_array;
+my $Rows            = $SthGetAllSubindexes->fetchall_arrayref;
 my @UpdatedRows     = grep{ $_->[4] != 0 } @$Rows;
 my $Changed         = scalar( @UpdatedRows );
-my $MainIndexOld    = $Db->getFirstRow( "xfci-check-main-index" , $Type , $Type );
+my $MainIndexOld    = $SthCheckMainIndex->fetchrow_array;
 
 if( ! $MainIndexExists )
 {
@@ -326,8 +340,9 @@ else
   exit;
 }
 
-$Db->execute( "xfci-delete-main-index" , $Type );
+$SthDeleteMainIndex->execute( $ContextName );
 $Logger->trace( "Deleted old entries for main index." );
+$Dbh->commit;
 # Data for main index }}}
 
 # Prework }}}
@@ -362,7 +377,8 @@ for my $Row ( @UpdatedRows )
   my $Pid = fork;
   if( defined( $Pid ) and $Pid == 0 )
   {
-    $Db = undef;
+    #$Dbh->rollback;
+    $Dbh = undef;
     $MainLogger = undef;
 
     my $StartTimeStamp = gettimeofday;
@@ -399,10 +415,10 @@ for my $Row ( @UpdatedRows )
       while( <$Fin> )
       {
         chomp;
-        my( $Id ) = m{^\01$Field(\d+)\01};
+        my( $Id ) = m{^\01$PrimaryKey(\d+)\01};
         if( ! $Id )
         {
-          $Logger->error( "Record does not start with field '$Field'" );
+          $Logger->error( "Record does not start with field '$PrimaryKey'" );
           if( ! m{^\01} )
           {
             $Logger->error( "First character should be binary 01" );
@@ -504,7 +520,7 @@ if( @Pids )
     }
     else
     {
-      $Db->execute( "xfci-update-subindex" , $Indexdate , $PidInfo->{$Pid} );
+      $SthUpdateSubindex->execute( $Indexdate , $PidInfo->{$Pid} );
       $Logger->info( "Marked index for $PidInfo->{$Pid} as correct" );
     }
     $Logger->trace( "Process $Pid returned $ReturnValue" );
@@ -522,98 +538,13 @@ if( @Pids )
 # Wait until all export jobs returned }}}
 
 # Load index files {{{
-
-# This is legacy since this procedure does not seem to be much faster than direct insert
-# statements but it's more difficult to maintain.
-if( 0 )
-{
-# Commit & release database handle {{{
-#$Db->dbh->commit;
-#$Db = undef;
-# Commit & release database handle }}}
-
-  my $ImportFile = undef;
-
-  $Logger->info( "Loading data into database" );
-
-  my $StartTimeStamp = gettimeofday;
-
-  $ImportFile = catfile( $TempDir , "import.sqlite" );
-  push( @RemoveFiles , $ImportFile );
-  my $ImportTable = $Type . "index";
-  my $Import = undef;
-  if( ! open( $Import , ">" , $ImportFile ) )
-  {
-    $Logger->fatal( "Cannot open $ImportFile: $!" );
-    exit 1;
-  }
-
-  printFile( $Import , "drop table if exists $ImportTable;\n" );
-  printFile( $Import , "create table $ImportTable ( id number , position number , fileid integer );\n" );
-  printFile( $Import , ".separator ','\n" );
-  for my $Row ( @$Rows )
-  {
-    my $JobIndexFile = $Row->[2];
-    printFile( $Import , ".import $JobIndexFile $ImportTable\n" );
-  }
-  printFile( $Import , "create unique index $ImportTable\_id on $ImportTable(id,fileid);\n" );
-  printFile( $Import , ".quit\n" );
-
-  if( ! close( $Import ) )
-  {
-    $Logger->fatal( "Cannot close $ImportFile: $!" );
-    exit 1;
-  }
-
-  my @CommandSqlite = ( "sqlite3" , $IndexDb , ".read $ImportFile" );
-  $Logger->trace( "Sqlite command: " . join( " " , @CommandSqlite ) );
-  my $ResultSqlite = run \@CommandSqlite;
-  if( ! $ResultSqlite )
-  {
-    $Logger->error( "Command: @CommandSqlite" );
-    $Logger->error( "Error while loading files, sqlite returned: $ResultSqlite" );
-    $Logger->error( "Message: $!" );
-    $TotalErrors = 1;
-  }
-  else
-  {
-    $Logger->info( "Loading of files successful" );
-    $Logger->info( "Data has been loaded into table $ImportTable" );
-  }
-
-  my $Elapsed = gettimeofday - $StartTimeStamp;
-  $Logger->info( sprintf( "Loading data took %.2f seconds" , $Elapsed ) );
-
-  # Connect to database again {{{
-  # This is required because SQLite can only be accessed once and not in parallel
-  # If the database would still be open then the loading with sqlite3 would have failed.
-  if( ! $TotalErrors )
-  {
-    my $Db = Elsevier::Database->new( xmlfile => "tab/database.xml" , database => "sqlite" , loglevel => $ERROR , pattern => "xfci-" );
-    if( ! $Db )
-    {
-      $Logger->fatal( "Cannot connect to database" );
-      exit 2;
-    }
-    $Db->execute( "xfci-insert-main-index" , $ImportTable , time , $Type );
-    $Logger->trace( "Injected new entry for main index." );
-    $Db->dbh->commit;
-    $Db = undef;
-  }
-  # Connect to database again }}}
-
-}
-# Load index files }}}
-
-# Load index files {{{
 if( ! $TotalErrors )
 {
   $Logger->info( "Loading data into database" );
 
   my $StartTimeStamp = gettimeofday;
 
-  my $ImportTable = $Type . "index";
-  my $Dbh = $Db->dbh;
+  my $ImportTable = "index_$ContextName";
 
   $Dbh->do( "drop table if exists $ImportTable" );
   $Dbh->do( "create table $ImportTable ( id number , position number , fileid integer )" );
@@ -623,7 +554,6 @@ if( ! $TotalErrors )
   {
     my $JobIndexFile = $Row->[2];
     open( F , "<" , $JobIndexFile );
-    #my $Sth = $Db->getSth( "xfci-citindex-insert" );
     while(<F>)
     {
       chomp;
@@ -643,9 +573,11 @@ if( ! $TotalErrors )
 
   if( ! $TotalErrors )
   {
-    $Db->execute( "xfci-insert-main-index" , $ImportTable , time , $Type );
+    $SthInsertMainIndex->execute( $ImportTable , time , $ContextName );
     $Logger->trace( "Injected new entry for main index." );
   }
+
+  $Dbh->commit;
 
 }
 # Load index files }}}
@@ -667,10 +599,10 @@ END
     {
       deleteTempFiles();
 
-      if( $Db )
+      if( $Dbh )
       {
-        $Db->dbh->rollback;
-        $Db = undef;
+        $Dbh->rollback;
+        $Dbh = undef;
       }
 
       $MainLogger->info( "END $? $CommandLine" ) if $MainLogger;
@@ -741,11 +673,11 @@ __END__
 
 =head1 NAME
  
-xf-create-index - Indexes 3 bytes files
+zwf-create-index - Indexes 3 bytes files
  
 =head1 SYNOPSIS
  
-xf-create-index [options] XF [XF ...]
+zwf-create-index [options] XF [XF ...]
  
  Options:
    -field <name>      The name of the field holding index number
@@ -830,14 +762,14 @@ be executed in parallel if requested. By default
 Create an index named cit.idx over all citation files. It uses systems temp directory
 and deletes the temporary files afterwards.
 
-$ xf-create-index -type cit -f R1_ cit*xf
+$ zwf-create-index -type cit -f R1_ cit*xf
 
 The same as above with given temp directory and no deletion of temp files:
 
-$ xf-create-index -i cit.idx -f R1_ -t temp -k cit*xf
+$ zwf-create-index -i cit.idx -f R1_ -t temp -k cit*xf
 
 The same as above but running with 16 parallel jobs:
 
-$ xf-create-index -i cit.idx -f R1_ -t temp -k -p 16 cit*xf
+$ zwf-create-index -i cit.idx -f R1_ -t temp -k -p 16 cit*xf
 
 =cut

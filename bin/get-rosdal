@@ -1,0 +1,40 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use Data::Dumper;
+
+my $Brns = getBrns( shift @ARGV );
+
+while( <> )
+{
+  ( my $Brn ) = m/BRN"(\d+)"/;
+  next if ! $Brn;
+  next if ! $Brns->{$Brn};
+  print;
+}
+exit;
+
+sub getBrns
+{
+  my $File = shift;
+
+  local $/ = "\02";
+  my $Brns = {};
+  my $Record = -1;
+
+  open( F , "<" , $File ) or die "$File: $!";
+  while( <F> )
+  {
+    $Record++;
+    ( my $Brn ) = m{^\01ID1(\d+)};
+    if( ! $Brn )
+    {
+      die "Record $Record has no ID1 entry\n";
+    }
+    $Brns->{$Brn} = 1;
+  }
+  close( F );
+
+  $Brns;
+}

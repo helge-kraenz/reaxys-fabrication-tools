@@ -4,12 +4,14 @@
 #==============================================================#
 #==============================================================#
 #
-# Version: 1.0.0
-# Updated: 2022-07-12
+# Version: 1.0.2
+# Updated: 2022-07-15
 # Author: Helge Kraenz
 #
 # History
 # 1.0.0   Initial    kraenzh
+# 1.0.1   Release    kraenzh
+# 1.0.2   Bugs fixed kraenzh
 #
 #==============================================================#
 #==============================================================#
@@ -67,7 +69,7 @@ $Options->{sample}     = "sample";
 #$Options->{parallel}  = 4;
 my $TotalErrors = 0;
 my @RemoveFiles = ();
-my $Version = "1.0.0";
+my $Version = "1.0.2";
 my $MyName  = basename( $0 );
 my $Overwrite = 0;
 #my $MainPid = $$;
@@ -106,8 +108,8 @@ my $Purge         = $Options->{purge};
 my $Delete        = $Options->{delete};
 my $SampleMarker  = $Options->{sample};
 my $IndexMarker   = "index";
-#my $FilesTable    = "${IndexMarker}_files";
-my $FilesTable    = "files";
+my $FilesTable    = "${IndexMarker}_files";
+#my $FilesTable    = "files";
 my $TrackingTable = "${SampleMarker}_tracking";
 # Abbreviations }}}
 
@@ -217,8 +219,8 @@ for my $ContextNode ( @ContextNodes )
 
   # Basic context settings {{{
   $Contexts->{$ContextName}->{order}       = $ContextNode->getAttribute( "order" ) || "9999";
-  #$Contexts->{$ContextName}->{indextable}  = "${IndexMarker}_$ContextName";
-  $Contexts->{$ContextName}->{indextable}  = "${ContextName}${IndexMarker}";
+  $Contexts->{$ContextName}->{indextable}  = "${IndexMarker}_$ContextName";
+  #$Contexts->{$ContextName}->{indextable}  = "${ContextName}${IndexMarker}";
   $Contexts->{$ContextName}->{sampletable} = "${SampleMarker}_${ContextName}";
   $Contexts->{$ContextName}->{outfile}     = $OutFile;
   $Contexts->{$ContextName}->{outdir}      = $OutDir;
@@ -508,7 +510,7 @@ for my $Context ( sort{ $Contexts->{$a}->{order} <=> $Contexts->{$b}->{order} } 
   $Logger->info( "Sample table has $Rows rows" );
 
   my $Sql = "select i.id,i.position,f.filename from $IndexTableName i , $SampleTableName s , $FilesTable f where i.id = s.id and i.fileid = f.id order by i.id";
-  $Logger->trace( $Sql );
+  $Logger->trace( "SQL: $Sql" );
   my $Sth = $Dbh->prepare( $Sql );
   $Sth->execute;
 
@@ -583,7 +585,7 @@ for my $Context ( sort{ $Contexts->{$a}->{order} <=> $Contexts->{$b}->{order} } 
         }
       }
     }
-    else
+    elsif( $LimitedBy ne "unlimited" )
     {
       $Logger->error( "Unsupported or undefined limit type $LimitedBy" );
       exit( 1 );
@@ -650,19 +652,22 @@ END
 
   $MainLogger->info( "END $? $CommandLine" ) if $MainLogger;
 
-  if( $TotalErrors )
+  if( $Logger )
   {
-    $Logger->info( "There were $TotalErrors errors" );
-  }
-  else
-  {
-    $Logger->info( "There were no errors" );
-  }
+    if( $TotalErrors )
+    {
+      $Logger->info( "There were $TotalErrors errors" );
+    }
+    else
+    {
+      $Logger->info( "There were no errors" );
+    }
 
-  my $Elapsed = gettimeofday - $STS;
-  $Logger->info( sprintf( "Execution time was %.2f seconds" , $Elapsed ) );
+    my $Elapsed = gettimeofday - $STS;
+    $Logger->info( sprintf( "Execution time was %.2f seconds" , $Elapsed ) );
 
-  $Logger->info( "$MyName $Version ended" );
+    $Logger->info( "$MyName $Version ended" );
+  }
 }
 # END }}}
 
@@ -796,7 +801,15 @@ sub openOut
 
 __END__
 
+=head1 NAME
 
+zwf-sample - Extracts a sample subset from source ZWF data set
+
+=head1 SYNOPSIS
+
+zwf-sample -c <config-file> [options]
+
+ Options:
    -config <file>     config file
    -delete            delete outputfiles
    -help              brief help
@@ -828,7 +841,7 @@ Print a brief help message and exits.
  
 =item B<-logconf file>
  
-The full path to a log configuration file for Log4Perl.
+The full path to a log configuration file. Default is $INDITAB/log.conf or ./log.conf.
  
 =item B<-man>
  
