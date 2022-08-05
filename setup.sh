@@ -1,9 +1,20 @@
+#!/bin/sh
+
+############################################################
+# INTERNAL STUFF                                           #
+# - EXEDIR: Directory of the executable                    #
+#                                                          #
+############################################################
+# shellcheck disable=SC2039
+EXEDIR=$(dirname "${BASH_SOURCE[0]}")
+
 ############################################################
 # TOOLS                                                    #
 #                                                          #
 # The base directory of the tools directory.               #
 ############################################################
-export TOOLS=$(realpath $(dirname ${BASH_SOURCE[0]}))
+TOOLS=$(realpath "$EXEDIR")
+export TOOLS
 
 ############################################################
 # PATH                                                     #
@@ -33,9 +44,9 @@ export PATH=$TOOLS/bin:$PATH
 # done when it's ensured that the executable is in the     #
 # path.                                                    #
 ############################################################
-command -v clean-path 1>/dev/null 2>&1
-if [ "$?" == "0" ]; then
-  export PATH=`clean-path $PATH`
+if command -v clean-path 1>/dev/null 2>&1; then
+  PATH=$(clean-path "$PATH")
+  export PATH
 fi
 
 ############################################################
@@ -49,4 +60,5 @@ fi
 # else.                                                    #
 ############################################################
 alias stools='(cd $TOOLS ; create-archive -z s3://nameservice/releases/tools MANIFEST-tools)'
-alias ltools='aws s3 ls s3://nameservice/releases/tools/| grep "PRE" | tail -1 | awk "{print \$2}"'
+alias ltools='aws s3 ls s3://nameservice/releases/tools/| grep "PRE" | tail -1 | sed -e "s/^.*PRE //"'
+#alias ltools='aws s3 ls s3://nameservice/releases/tools/| grep "PRE" | tail -1 | awk "{print \$2}"'
