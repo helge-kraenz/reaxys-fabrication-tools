@@ -10,7 +10,13 @@ while( <> )
 {
   ( my $Brn ) = m/BRN"(\d+)"/;
   next if ! $Brn;
-  next if ! $Brns->{$Brn};
+  next if ! defined $Brns->{$Brn};
+  if( $Brns->{$Brn} )
+  {
+    print STDERR "BRN $Brn has been dumped already\n";
+    next;
+  }
+  $Brns->{$Brn}++;
   print;
 }
 exit;
@@ -32,7 +38,7 @@ sub getBrns
     {
       die "Record $Record has no ID1 entry\n";
     }
-    $Brns->{$Brn} = 1;
+    $Brns->{$Brn} = 0;
   }
   close( F );
 
