@@ -4,14 +4,15 @@
 #==============================================================#
 #==============================================================#
 #
-# Version: 1.0.2
-# Updated: 2022-07-15
+# Version: 1.1.0
+# Updated: 2022-08-11
 # Author: Helge Kraenz
 #
 # History
 # 1.0.0   Initial    kraenzh
 # 1.0.1   Release    kraenzh
 # 1.0.2   Bugs fixed kraenzh
+# 1.1.0   RX-6046    kraenzh
 #
 #==============================================================#
 #==============================================================#
@@ -66,10 +67,11 @@ $Options->{purge}      = 0;
 $Options->{delete}     = 0;
 $Options->{outdir}     = undef;
 $Options->{sample}     = "sample";
+$Options->{taxonomies} = undef;
 #$Options->{parallel}  = 4;
 my $TotalErrors = 0;
 my @RemoveFiles = ();
-my $Version = "1.0.2";
+my $Version = "1.1.0";
 my $MyName  = basename( $0 );
 my $Overwrite = 0;
 #my $MainPid = $$;
@@ -77,7 +79,7 @@ my $Overwrite = 0;
 # Variables }}}
 
 # Parse command line {{{
-my $ParseResult = GetOptions( $Options , "config=s" , "delete" , "help|h" , "logconf=s" , "man" , "outdir=s" , "purge" , "references!" , "sample=s" , "version|V" );
+my $ParseResult = GetOptions( $Options , "config=s" , "delete" , "help|h" , "logconf=s" , "man" , "outdir=s" , "purge" , "references!" , "sample=s" , "taxonomies!" , "version|V" );
 pod2usage( 1 ) if ! $ParseResult;
 # Parse command line }}}
 
@@ -104,6 +106,7 @@ if( $Options->{version} )
 # Abbreviations {{{
 my $ConfigFile    = $Options->{config};
 my $References    = $Options->{references};
+my $Taxonomies    = $Options->{taxonomies};
 my $Purge         = $Options->{purge};
 my $Delete        = $Options->{delete};
 my $SampleMarker  = $Options->{sample};
@@ -146,9 +149,14 @@ my $STS = gettimeofday;
 # Payload {{{
 
 # Parse configuration XML {{{
+
+# Init parser {{{
 $Logger->debug( "Parsing config xml '$ConfigFile'" );
 my $ContextCount = 0;
 my $Dom = XML::LibXML->load_xml( location => $ConfigFile );
+# Init parser }}}
+
+# Extract general parameters {{{
 my $Database = $Dom->findvalue( "/sample/database" );
 if( ! $Database )
 {
@@ -199,28 +207,41 @@ if( ! $SampleMarker || $SampleMarker eq $IndexMarker || $SampleMarker !~ /^\w+$/
   $Logger->fatal( "SampleMarker for tables not defined or incorrect" );
   exit 2;
 }
+# Extract general parameters }}}
 
+# Handle context nodes {{{
 my @ContextNodes = $Dom->findnodes( qq{/sample/contexts/context} );
 $Logger->debug( "Found " . scalar( @ContextNodes ) . " context definitions" );
 
 my $Contexts = {};
 for my $ContextNode ( @ContextNodes )
 {
-  # Check name {{{
+  # Check name and type {{{
   my $ContextName = $ContextNode->getAttribute( "name" );
+  my $ContextType = $ContextNode->getAttribute( "type" );
   $ContextCount++;
   if( ! $ContextName )
   {
     $Logger->fatal( "Context #$ContextCount has no name" );
     exit 2;
   }
+  if( ! $ContextType )
+  {
+    $Logger->fatal( "Context $ContextName has no type" );
+    exit 2;
+  }
+  if( $ContextType !~ /^taxonomy|context$/ )
+  {
+    $Logger->fatal( "Context type of context $ContextName must be either 'context' or 'taxonomy' but is '$ContextType'" );
+    exit 2;
+  }
   $Logger->info( "Parsing definition of context #$ContextCount '$ContextName'" );
-  # Check name }}}
+  # Check name and type }}}
 
   # Basic context settings {{{
+  $Contexts->{$ContextName}->{type}        = $ContextType;
   $Contexts->{$ContextName}->{order}       = $ContextNode->getAttribute( "order" ) || "9999";
   $Contexts->{$ContextName}->{indextable}  = "${IndexMarker}_$ContextName";
-  #$Contexts->{$ContextName}->{indextable}  = "${ContextName}${IndexMarker}";
   $Contexts->{$ContextName}->{sampletable} = "${SampleMarker}_${ContextName}";
   $Contexts->{$ContextName}->{outfile}     = $OutFile;
   $Contexts->{$ContextName}->{outdir}      = $OutDir;
@@ -230,31 +251,51 @@ for my $ContextNode ( @ContextNodes )
   $Contexts->{$ContextName}->{facts}       = [];
   # Basic context settings }}}
 
-  # Read subset definitions {{{
-  my $SourceCount = 0;
-  my @SourceNodes = $ContextNode->findnodes( qq{subset/source} );
-  for my $SourceNode ( @SourceNodes )
+  if( $ContextType eq "context" )
   {
-    $SourceCount++;
-    my $Type = $SourceNode->getAttribute( "type" );
-    my $Content = $SourceNode->to_literal;
-    my $Source = {};
-    if( ! $Type )
+
+    # Read subset definitions {{{
+    my $SourceCount = 0;
+    my @SourceNodes = $ContextNode->findnodes( qq{subset/source} );
+    for my $SourceNode ( @SourceNodes )
     {
-      $Logger->fatal( "Source #$SourceCount of context '$ContextName' has no type definition" );
-      exit 2;
+      $SourceCount++;
+      my $Type = $SourceNode->getAttribute( "type" );
+      my $Content = $SourceNode->to_literal;
+      my $Source = {};
+      if( ! $Type )
+      {
+        $Logger->fatal( "Source #$SourceCount of context '$ContextName' has no type definition" );
+        exit 2;
+      }
+      if( ! $Content )
+      {
+        $Logger->fatal( "Source #$SourceCount of context '$ContextName' has no content" );
+        exit 2;
+      }
+      $Source->{type}    = $Type;
+      $Source->{content} = $Content;
+      push( @{$Contexts->{$ContextName}->{subsets}} , $Source );
     }
-    if( ! $Content )
-    {
-      $Logger->fatal( "Source #$SourceCount of context '$ContextName' has no content" );
-      exit 2;
-    }
-    $Source->{type}    = $Type;
-    $Source->{content} = $Content;
-    push( @{$Contexts->{$ContextName}->{subsets}} , $Source );
+    $Logger->info( "Context #$ContextCount '$ContextName' has $SourceCount sources" );
+    # Read subset definitions }}}
+
   }
-  $Logger->info( "Context #$ContextCount '$ContextName' has $SourceCount sources" );
-  # Read subset definitions }}}
+  elsif( $ContextType eq "taxonomy" )
+  {
+    if( $Taxonomies )
+    {
+      my $Source = {};
+      $Source->{type}    = "complete";
+      $Source->{content} = "";
+      push( @{$Contexts->{$ContextName}->{subsets}} , $Source );
+      $Logger->info( "Context #$ContextCount '$ContextName' is a taxonomy - performing full export" );
+    }
+    else
+    {
+      $Logger->info( "Context #$ContextCount '$ContextName' is a taxonomy - not exporting at all" );
+    }
+  }
 
   # Store foreign key relations {{{
   my $ForeignKeyCount = 0;
@@ -263,7 +304,6 @@ for my $ContextNode ( @ContextNodes )
   my @SourceFields = ();
   for my $ForeignKeyNode ( @ForeignKeyNodes )
   {
-    $ForeignKeyCount++;
     my $Target = $ForeignKeyNode->getAttribute( "target" );
     my $Source = $ForeignKeyNode->to_literal;
     if( ! $Target )
@@ -276,6 +316,12 @@ for my $ContextNode ( @ContextNodes )
       $Logger->fatal( "Source of foreign key #$ForeignKeyCount undefined" );
       exit 2;
     }
+    if( $Target eq $ContextName )
+    {
+      $Logger->warn( "Field $Source of context $ContextName is a self reference - skipping this definition" );
+      next;
+    }
+    $ForeignKeyCount++;
     push( @SourceFields , $Source );
     $Contexts->{$ContextName}->{foreignkeys}->{$Source} = $Target;
   }
@@ -284,6 +330,7 @@ for my $ContextNode ( @ContextNodes )
   $Contexts->{$ContextName}->{foreignkeysregex} = $Regex;
   $Logger->info( "Context #$ContextCount '$ContextName' has $ForeignKeyCount foreign keys defined" );
   # Store foreign key relations }}}
+
 #  my @Citations = map{$_->to_literal} $ContextNode->findnodes( qq{citations/field} );
 #  my $Citations = scalar @Citations;
 #  $Contexts->{$ContextName}->{citations} = \@Citations;
@@ -314,6 +361,8 @@ for my $ContextNode ( @ContextNodes )
 
   $Logger->info( "Parsed definition of context '$ContextName'" );
 }
+# Handle context nodes }}}
+
 $Logger->info( "Config XML parsed" );
 # Parse configuration XML }}}
 
@@ -403,12 +452,15 @@ for my $Context ( sort{ $Contexts->{$a}->{order} <=> $Contexts->{$b}->{order} } 
   $Logger->debug( "Removed content of $SampleTableName" );
 
   $Logger->info( "Creating sample set for context $Context" );
+  $Logger->trace( "Context type is $Contexts->{$Context}->{type}" );
 
   # Fill table with data
   for my $Subset ( @{$Contexts->{$Context}->{subsets}} )
   {
     my $Type = $Subset->{type};
     my $Content = $Subset->{content};
+
+    $Logger->trace( "Subset type is $Type" );
 
     if( $Type =~ /^relative$/i )
     {
@@ -430,6 +482,13 @@ for my $Context ( sort{ $Contexts->{$a}->{order} <=> $Contexts->{$b}->{order} } 
       loadFile( $Context , $Content );
       my $Elapsed = gettimeofday - $StartTimeStamp;
       $Logger->debug( sprintf( "File loading took %.2f seconds" , $Elapsed ) );
+    }
+    elsif( $Type =~ /^complete$/i )
+    {
+      my $StartTimeStamp = gettimeofday;
+      loadComplete( $Context );
+      my $Elapsed = gettimeofday - $StartTimeStamp;
+      $Logger->debug( sprintf( "Complete loading took %.2f seconds" , $Elapsed ) );
     }
     else
     {
@@ -478,6 +537,7 @@ for my $Context ( sort{ $Contexts->{$a}->{order} <=> $Contexts->{$b}->{order} } 
   my $ContextOutDir    = $Contexts->{$Context}->{outdir};
   my $LimitedBy        = $Contexts->{$Context}->{outlimitedby};
   my $Limit            = $Contexts->{$Context}->{outlimit};
+  my $Type             = $Contexts->{$Context}->{type};
   my $RefAdded         = {};
   my $Regex            = $Contexts->{$Context}->{foreignkeysregex};
   my $SampleTableName  = $Contexts->{$Context}->{sampletable};
@@ -485,6 +545,12 @@ for my $Context ( sort{ $Contexts->{$a}->{order} <=> $Contexts->{$b}->{order} } 
   my $TableStamp       = $SamplesPresent->{$Context};
   my $FileStamp        = $FilesPresent->{$Context} || 0;
   # Initialization }}}
+
+  if( ! $Taxonomies && $Type eq "taxonomy" )
+  {
+    $Logger->info( "Dumping of taxonomies suppressed" );
+    next;
+  }
 
   if( $Delete )
   {
@@ -654,19 +720,21 @@ END
 
   if( $Logger )
   {
-    if( $TotalErrors )
+    my $Elapsed = gettimeofday - $STS;
+    $Logger->info( sprintf( "Execution time was %.2f seconds" , $Elapsed ) );
+
+    $Logger->info( "$MyName $Version ended" );
+
+    if( $? != 0 )
     {
-      $Logger->info( "There were $TotalErrors errors" );
+      $TotalErrors = 1 if ! $TotalErrors;
+      $Logger->error( "There were $TotalErrors error(s)" );
     }
     else
     {
       $Logger->info( "There were no errors" );
     }
 
-    my $Elapsed = gettimeofday - $STS;
-    $Logger->info( sprintf( "Execution time was %.2f seconds" , $Elapsed ) );
-
-    $Logger->info( "$MyName $Version ended" );
   }
 }
 # END }}}
@@ -724,6 +792,22 @@ sub loadAbsolute
   $Logger->trace( "Inserted data into $SampleTableName" );
 }
 # loadAbsolute }}}
+
+# loadComplete {{{
+sub loadComplete
+{
+  my $Context  = shift;
+
+  my $IndexTableName  = $Contexts->{$Context}->{indextable};
+  my $SampleTableName = $Contexts->{$Context}->{sampletable};
+
+  my $Sql = "insert into $SampleTableName select id from $IndexTableName order by id";
+  $Logger->trace( "SQL: $Sql" );
+  my $Sth = $Dbh->prepare( $Sql );
+  $Sth->execute;
+  $Logger->trace( "Inserted data into $SampleTableName" );
+}
+# loadComplete }}}
 
 # loadFile {{{
 sub loadFile
@@ -819,6 +903,7 @@ zwf-sample -c <config-file> [options]
    -purge             purge everything
    -references        resolve references
    -sample <string>   sample marker
+   -taxonomies        dump taxonomies
    -version           print version and exit
  
 =head1 OPTIONS
@@ -865,6 +950,10 @@ Controls if the output data is referential integer. True by default.
 Gives a string which is used as prefix for sample tables in the database. Defaults
 to sample.
  
+=item B<-taxonomies>
+ 
+Triggers dumping of taxonomies.
+ 
 =item B<-version>
  
 Prints the version and exits.
@@ -888,14 +977,23 @@ stored internally for later use. Detailed description can be found in CONFIGURAT
 Next the program connects to the database. The database definition is taken from 
 configuration XML. The purpose of this database is twofold: Firstly, it has to contains the
 index tables belonging to the source files. Those index tables are created by
-B<xf-create-index>. The tables named "*index" and "files" are part of this database
+B<zwf-create-index>. The tables named "*index" and "files" are part of this database
 so, do not touch or delete them! The outher purpose is to store temporary data
 required for extraction. Those typically controlled by the program so there should
 by no need for manual interaction with the database.
 
 After all the preparation steps the next step is to create sample tables. This is done by
 looping over each table which will is part of the sample as defined in configuration
-XML. 
+XML. Refer to next 2 sections for a detailed explanation how tables are handled.
+
+Once a dataset of a specific context has been dumped an entry is generated marking this context
+as dumped so it won't be dumped again unless this is explicitely requested or sample table
+is re-created.
+
+=head2 Normal Contexts
+
+A normal context is defined by the keyword "context" in the attribute "type" of
+context node.
 
 For each table a table named "<context>sample" is created which holds exactly one column,
 the primary key of the records. There are three ways to add data to this table:
@@ -914,7 +1012,8 @@ again the sample will not be re-generated.
 After the tables with sample IDs have been generated for each context. Next step is to extract
 the required records from the source data set and write them to the target data set.
 This is again done by looping over each context but here the context need to be processed
-in a given order. The order is rea, dat, mtb, com, mea, trg, ass, pro, fct, cit.
+in a given order. The order is ass, bio, cel, cit, cmp, com, dat, eff, fct, mde, mea, mtb,
+pat, pkp, pro, rbi, rct, rea, rou, sit, sol, spc, tar, tis, trg, trm.
 The reason why the processing is done in order is the reference resolvment. If for
 example rea is processed all references to all other contexts from rea are collected
 and the IDs are added to the sample tables of those contexts. For rea there is
@@ -922,13 +1021,46 @@ the reference BZ0 pointing to citation context and all numbers found in BZ0 are 
 to citation sample table. By following this procedure the resultiung sample set
 is referential integer in a sense that all references can be resolved.
 However, there are two exceptions of references which won't be resolved: Any reference
-to a taxonomy will not be included and any reference pointing to the same context
-are ignored as well. The latter affects only the references from fct context to itself defined
-by the fields IDR and PS2 and there self reference in dat by field DPM.
+not directly pointing to a single target field or containing a range of keys
+will not be included and any reference pointing to the same context
+are ignored as well. The latter affects for example the references from fct context
+to itself defined
+by the fields IDR and PS2 and there self reference in dat by field DPM. And of course
+all taxonomies.
 
-Once a dataset of a specific context has been dumped an entry is generated marking this context
-as dumped so it won't be dumped again unless this is explicitely requested or sample table
-is re-created.
+=head2 Taxonomies
+
+A taxonomy is defined by the keyword "taxonomy" in the attribute "type" of
+context node.
+
+Taxonomies are B<not> dumped by default. Dumping can be triggered by using the
+B<-taxonomy> switch on command line. I that can case the complete taxonomy is dumped.
+No subset of the taxonomy can be extracted.
+
+References from taxonomies to other context won't be handled as well for two reasons:
+
+=over 4
+
+=item - 
+
+The dump may become very large. For example, the (small) reactant taxonomies would add
+all substances (fct context) to the output that have been used *once* as reactant.
+Those are curently 77K records and if the dump size should contain only 1K records
+then the number of undesired records would be immense compared to the requested amount.
+
+On the other hand this leads to a lot of error messages during coupling in summus
+since the targets of the taxonomies are not included.
+
+=item - 
+
+Taxonomies often do not have clear source and target definitions. Sources may contain ranges
+of primary keys and target definitions would often need much more sophisticated handling
+which would be by far too much for this program.
+
+=back
+
+Please note that taxonomies cannot be omitted because summus cannot handle empty or not present
+contexts.
 
 =head1 CONFIGURATION
 
