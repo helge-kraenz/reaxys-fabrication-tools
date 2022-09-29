@@ -206,9 +206,9 @@ Reads a zwf file named rea.xf, replaces the string "01" with "10" in BL1 fields 
 
 $ zwf-replace -f BL1 -s 01 r 10 > out.xf
 
-Dynamic replacement works as well; 
-this reads a zwf file named rea.xf, duplicates the string "01" and dumps to out.xf:
+=head1 TODO
 
-$ zwf-replace -f BL1 -s 01 r "\$1\$1" > out.xf
+Support dynamic replacement, i.e. replacing with the matching string.
 
+ 
 =cut
