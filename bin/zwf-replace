@@ -163,6 +163,8 @@ The name of the field in which replacement occurs. Required.
  
 =item B<-help>
  
+Prints the help and exits.
+
 =item B<-man>
  
 Prints the manual page and exits.
