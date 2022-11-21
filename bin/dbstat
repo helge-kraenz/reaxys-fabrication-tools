@@ -1,0 +1,94 @@
+#!/usr/bin/perl -w
+
+use DBI;
+use strict;
+use Getopt::Long;
+use Carp;
+use Time::HiRes qw( gettimeofday tv_interval );
+use File::Glob ':glob';
+
+my $Connect = undef;
+
+GetOptions( "connect=s" => \$Connect );
+
+die "No connect string given.\n" if( ! $Connect );
+
+# Parse connect string
+#my( $User , $Password , $Database , $Host , $Port );
+my( $User , $Password , $Rem ) = ( $Connect =~ m{^(.+?)/(.+?)\@(.+)$} );
+die "Connect string illegal - use an Oracle compliant connect string\n" if( ! $User );
+my $Dsn = "dbi:Oracle:$Rem";
+if( $Rem =~ m{^//} )
+{
+  my( $Host , $Database ) = ( $Rem =~ m{^//(.+?)/(.+)$} );
+  die "Connect string illegal - use an Oracle compliant connect string\n" if( ! $Host );
+  my $Port = 1521;
+  if( $Host =~ m{:} )
+  {
+    ( $Host , $Port ) = ( $Host =~ m{^(.+):(.+?)$} );
+  }
+  $Dsn = "dbi:Oracle:host=$Host;port=$Port;sid=$Database";
+}
+die "Connect string illegal - use an Oracle compliant connect string\n" if( ! $Dsn );
+print "$Dsn\n";
+
+# Connect
+my $Dbh = DBI->connect( $Dsn , $User , $Password  , { LongReadLen => 10240*10240 , LongTruncOk => 1 , AutoCommit => 0 , RaiseError => 1 } ) or croak( "$DBI::errstr" );
+#my $Dbh = DBI->connect( "dbi:Oracle:$Database" , $User , $Password  , { LongReadLen => 1024000*1024000 , LongTruncOk => 1 , AutoCommit => 0 , RaiseError => 1 } ) or croak( "$DBI::errstr" );
+
+# Get list of tables
+my @Tables = ();
+if( ! @ARGV )
+{
+  my $RCol = $Dbh->selectcol_arrayref( "select table_name from user_tables order by table_name" );
+  push( @Tables , @$RCol );
+}
+else
+{
+  push( @Tables , map{ uc } @ARGV  );
+}
+
+# Loop over tables
+my( $Colname , $Datatype , $Datalength );
+my $Sth1 = $Dbh->prepare( "select column_name,data_type,data_length from user_tab_columns where table_name = ? order by column_id" );
+my $Sth2 = $Dbh->prepare( "select index_name from user_ind_columns where table_name = ? and column_name = ? " );
+for my $Table ( @Tables )
+{
+  $Sth1->execute( $Table );
+  my $Ref = $Sth1->fetchall_arrayref;
+
+  my $Sth3 = $Dbh->prepare( "select count(*) from $Table " );
+  $Sth3->execute;
+  my $TableCount = $Sth3->fetchrow_array;
+  $Sth3->finish;
+
+  my @Max = ( undef , undef , undef );
+  for my $Row ( @$Ref )
+  {
+    my $Sth4 = $Dbh->prepare( "select count(*) from $Table where $Row->[0] is null" );
+    $Sth4->execute;
+    my $NullCount = $Sth4->fetchrow_array;
+    $Sth4->finish;
+    #$Sth2->execute( $Table , $Row->[0] );
+    #my @Indexes = map{ $_->[0] } @{$Sth2->fetchall_arrayref};
+    #my $Indexes = join( " " , @Indexes );
+    push( @$Row , $TableCount , $NullCount , $TableCount-$NullCount );
+    #push( @$Row , $Indexes );
+
+    print STDERR join("," , $Table,@$Row ) . "\n";
+
+    for ( 0..$#{$Row} )
+    {
+      my $Len = length $Row->[$_];
+      $Max[$_] = $Len if( ! defined $Max[$_] || $Len > $Max[$_] );
+    }
+  }
+
+  my $FormatString = "%s  " . join( " " , map{ "%-${_}s" } @Max ) . "\n";
+  for my $Row ( @$Ref )
+  {
+    printf( $FormatString , $Table , @$Row );
+  }
+}
+
+$Dbh->rollback;
