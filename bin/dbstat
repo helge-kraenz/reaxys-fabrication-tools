@@ -52,6 +52,7 @@ else
 my( $Colname , $Datatype , $Datalength );
 my $Sth1 = $Dbh->prepare( "select column_name,data_type,data_length from user_tab_columns where table_name = ? order by column_id" );
 my $Sth2 = $Dbh->prepare( "select index_name from user_ind_columns where table_name = ? and column_name = ? " );
+print STDOUT join(" " , qw(Table Column Type Length Count Null NotNull) ) . "\n";
 print STDERR join("," , qw(Table Column Type Length Count Null NotNull) ) . "\n";
 for my $Table ( @Tables )
 {
