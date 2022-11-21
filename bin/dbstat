@@ -30,7 +30,7 @@ if( $Rem =~ m{^//} )
   $Dsn = "dbi:Oracle:host=$Host;port=$Port;sid=$Database";
 }
 die "Connect string illegal - use an Oracle compliant connect string\n" if( ! $Dsn );
-print "$Dsn\n";
+#print "$Dsn\n";
 
 # Connect
 my $Dbh = DBI->connect( $Dsn , $User , $Password  , { LongReadLen => 10240*10240 , LongTruncOk => 1 , AutoCommit => 0 , RaiseError => 1 } ) or croak( "$DBI::errstr" );
@@ -52,6 +52,7 @@ else
 my( $Colname , $Datatype , $Datalength );
 my $Sth1 = $Dbh->prepare( "select column_name,data_type,data_length from user_tab_columns where table_name = ? order by column_id" );
 my $Sth2 = $Dbh->prepare( "select index_name from user_ind_columns where table_name = ? and column_name = ? " );
+print STDERR join("," , qw(Table Column Type Length Count Null NotNull) ) . "\n";
 for my $Table ( @Tables )
 {
   $Sth1->execute( $Table );
