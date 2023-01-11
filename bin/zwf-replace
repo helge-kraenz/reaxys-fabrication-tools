@@ -4,13 +4,15 @@
 #==============================================================#
 #==============================================================#
 #
-# Version: 1.0.1
-# Updated: 2022-07-14
+# Version: 2.0.0
+# Updated: 2023-01-11
 # Author: Helge Kraenz
 #
 # History
-# 1.0.0   Initial    kraenzh
-# 1.0.1   Released   kraenzh
+# 1.0.0   Initial             kraenzh
+# 1.0.1   Released            kraenzh
+# 1.0.2   Logging Support     kraenzh
+# 2.0.0   RX-6844, RX-7129    kraenzh
 #
 #==============================================================#
 #==============================================================#
@@ -35,43 +37,136 @@ use warnings;
 use File::Basename;
 use Getopt::Long;
 use Pod::Usage;
+use XML::LibXML;
+use Data::Dumper;
+use Carp;
+use Log::Log4perl qw( get_logger :easy );
+use Log::Log4perl::Level;
+use Time::HiRes qw( gettimeofday );
+use File::Spec::Functions qw( :ALL );
+use Cwd qw( abs_path );
 # Modules and pragmas }}}
 
 # Variables {{{
-my $VERSION   = "1.0.0";
-my $MyName    = basename( $0 );
+my $CommandLine = join( " " , ( $0 , @ARGV ) );
+my $VERSION     = "1.0.2";
+my $MainPid     = $$;
+my $MyName      = basename( $0 );
 
-my $FieldCode = undef;
-my $Search    = "";
-my $Replace   = "";
-my $Help      = undef;
-my $Man       = undef;
-my $Version   = undef;
+my $IndiTab = $ENV{"INDITAB"};
+   $IndiTab = "." if( ! $IndiTab || ! -d $IndiTab );
+
+my $Options            = {};
+$Options->{configfile} = undef;
+$Options->{fieldcode}  = undef;
+$Options->{input}      = "-";
+$Options->{logconf}    = abs_path( catfile( $IndiTab , "log.conf" ) );
+$Options->{output}     = "-";
+$Options->{replace}    = "";
+$Options->{report}     = 10000;
+$Options->{search}     = "";
 # Variables }}}
 
 # Parse command line {{{
-GetOptions(
-  "field=s"   => \$FieldCode ,
-  "help"      => \$Help      ,
-  "man"       => \$Man       ,
-  "replace=s" => \$Replace   ,
-  "search=s"  => \$Search    ,
-  "version"   => \$Version   ,
-);
+my $ParseResult = GetOptions( $Options , "config=s" , "field=s" , "help|h" , "input=s" , "logconf=s" , "man" , "output=s" , "replace=s" , "search=s" , "version|V" );
+pod2usage( 1 ) if ! $ParseResult;
 # Parse command line }}}
 
-# Check parameters {{{
-pod2usage( 0 ) if $Help;
-pod2usage( -verbose => 2 , -exitval => 0 ) if $Man;
-if( $Version )
+# Setup fundamental logging {{{
+croak( "Log definition file undefined, stopping" ) if ( ! $Options->{logconf} );
+croak( "Cannot find log definition file $Options->{logconf}, stopping" ) if ( ! -s $Options->{logconf} );
+Log::Log4perl->init_and_watch( $Options->{logconf} , 'HUP' ) if( ! Log::Log4perl->initialized() );
+our $MainLogger = get_logger( "Rtl" );
+$MainLogger->info( "START $CommandLine" );
+# Setup fundamental logging }}}
+
+# Handle trivial options {{{
+pod2usage( 0 ) if $Options->{help};
+pod2usage( -verbose => 2 , -exitval => 0 ) if $Options->{man};
+if( $Options->{version} )
 {
   print( "This is $MyName, version $VERSION\n" );
   exit;
 }
-die "No field given.\n" if ! $FieldCode;
-die "No search string given.\n" if ! $Search;
-die "No replace string given.\n" if ! defined $Replace;
+# Handle trivial options }}}
+
+# Startup {{{
+
+# Abbreviations {{{
+
+my $ConfigFile = $Options->{config};
+my $FieldCode  = $Options->{field};
+my $Search     = $Options->{search};
+my $Replace    = $Options->{replace};
+my $Infile     = $Options->{input};
+my $Outfile    = $Options->{output};
+# Abbreviations }}}
+
+# Startup message {{{
+my $Logger = get_logger( "zwf-replace" );
+$Logger->info( "$MyName $VERSION started" );
+$Logger->info( "Call: $CommandLine" );
+# Startup message }}}
+
+# Check parameters {{{
+if( ! $ConfigFile )
+{
+  if( ! $FieldCode )
+  {
+    $Logger->fatal( "No field given." );
+    exit( 2 );
+  }
+  if( ! $Search )
+  {
+    $Logger->fatal( "No search string given." );
+    exit( 2 );
+  }
+  if( ! defined $Replace )
+  {
+    $Logger->fatal( "No replace string given." );
+    exit( 2 );
+  }
+}
+else
+{
+  if( ! -s $ConfigFile )
+  {
+    $Logger->fatal( "No config file found or config file is empty." );
+    exit( 2 );
+  }
+}
+if( ! $Infile )
+{
+  $Logger->fatal( "Input file unset" );
+  exit( 2 );
+}
+if( ! $Outfile )
+{
+  $Logger->fatal( "Output file unset" );
+  exit( 2 );
+}
 # Check parameters }}}
+
+# Dump parameters {{{
+for my $Key( sort keys %$Options )
+{
+  my $Val = $Options->{$Key} || "";
+  $Logger->debug( "Parameter $Key: $Val" );
+}
+# Dump parameters }}}
+
+my $STS = gettimeofday;
+# Startup }}}
+
+# Read configuration {{{
+my $Config = undef;
+my $Rules  = undef;
+if( $ConfigFile )
+{
+  ( $Config , $Rules ) = parseXml( $ConfigFile );
+}
+$Logger->info( "Configuration file read" );
+# Read configuration }}}
 
 # Prepare loops {{{
 my $Records        = 0;
@@ -80,15 +175,27 @@ my $Fields         = 0;
 my $Changed        = 0;
 my $MatchingFields = 0;
 my $ChangedFields  = 0;
+my $NextReport     = $Options->{report};
    $/              = "\02";
 # Prepare loops }}}
 
 # Record loop {{{
+my $F = undef;
+if( $Outfile && $Outfile ne "-" )
+{
+  open( $F , ">" , $Outfile ) or die "$Outfile: $!\n";
+}
 while( my $Record = <> )
 {
   chomp( $Record );
   next if ! $Record;
   $Records++;
+
+  if( $Records >= $NextReport )
+  {
+    $Logger->info( "Processed $Records records with $Facts facts and $Fields fields so far" );
+    $NextReport = $NextReport + $Options->{report};
+  }
 
   # Fact loop {{{
   my @Facts = split( /\03/ , $Record );
@@ -96,44 +203,228 @@ while( my $Record = <> )
   {
     $Facts++ if $Fact;
 
-    # Field loop {{{
-    my @Fields = split( /\01/ , $Fact );
-    for my $Field ( @Fields )
+    # Configuration comes from command line directly {{{
+    if( ! $Config )
     {
-      if( $Field )
+      # Field loop {{{
+      my @Fields = split( /\01/ , $Fact );
+      for my $Field ( @Fields )
       {
-        $Fields++;
-
-        if( substr( $Field , 0 , 3 ) eq $FieldCode )
+        if( $Field )
         {
-          $MatchingFields++;
-          my $Hits = ( substr( $Field , 3 ) =~ s{$Search}{$Replace}gms );
-          $Changed = $Changed + $Hits;
-          $ChangedFields++ if $Hits > 0;
-        }
-        print "\01$Field";
-      }
-    }
-    # Field loop }}}
+          $Fields++;
 
-    print "\03";
+          if( substr( $Field , 0 , 3 ) eq $FieldCode )
+          {
+            $MatchingFields++;
+            my $Hits = ( substr( $Field , 3 ) =~ s{$Search}{$Replace}gms );
+            $Changed = $Changed + $Hits;
+            $ChangedFields++ if $Hits > 0;
+          }
+          $F ? print $F "\01$Field" : print "\01$Field";
+        }
+      }
+      # Field loop }}}
+    } 
+    # Configuration comes from command line directly }}}
+
+    # Configuration via config file {{{
+    else
+    {
+      my $Replaced = $Fact =~ s{
+        (?<=\x{01})(...)([^\x{01}]+)
+      }{
+        applyChanges( $1 , $2 );
+      }gxe;
+      $F ? print $F "$Fact" : print "$Fact";
+      $Fields = $Fields + $Replaced;
+    }
+    # Configuration via config file }}}
+
+    $F ? print $F "\03" : print "\03";
   }
   # Fact loop }}}
 
-  print "\02";
+  $F ? print $F "\02" : print "\02";
 }
 # Record loop }}}
 
-print STDERR <<EOF;
-Records:         $Records
-Facts:           $Facts
-Fields:          $Fields
-Fields Matching: $MatchingFields
-Changes:         $Changed
-Fields Changed:  $ChangedFields
-EOF
+$Logger->info( "Processed $Records records" );
+$Logger->info( "Processed $Facts facts" );
+$Logger->info( "Processed $Fields fields" );
 
 exit;
+
+# END {{{
+END
+{
+  $MainLogger->info( "END $? $CommandLine" ) if $MainLogger;
+
+  my $Ela = gettimeofday - $STS;
+  $Logger->info( sprintf( "Execution time %.2f seconds" , $Ela ) );
+
+  $Logger->info( "$MyName $VERSION ended" );
+}
+# END }}}
+
+sub applyChanges
+{
+  my $Field = shift;
+  my $Content = shift;
+
+  for my $RuleId ( @{$Config->{$Field}} )
+  {
+    $Content =~ s/$Rules->{$RuleId}->{Regex}/$Rules->{$RuleId}->{Replace}/g;
+  }
+  #print "$Field$Field$Content$Content";
+  #"$Field$Field$Content$Content";
+  $Field . $Content;
+}
+
+# parseXml {{{
+sub parseXml
+{
+  my $File = shift;
+
+  # Declare variables {{{
+  my $Fields = {}; 
+  my $Rules  = {}; 
+  # Declare variables }}}
+
+  # Parse XML {{{
+  my $Dom = XML::LibXML->load_xml( location => $File );
+  # Parse XML }}}
+
+  # Read rules definition {{{
+
+  # Search for all rule nodes {{{
+  my @RuleNodes = $Dom->findnodes( "/config/rules/rule" );
+  my $RuleNodes = scalar( @RuleNodes );
+  $Logger->trace( qq{Found $RuleNodes rule definition(s)} );
+  if( $RuleNodes <= 0 )
+  {
+    $Logger->fatal( qq{No nodes matching /config/rules/rule found.} );
+    exit( 2 );
+  }
+  # Search for all rule nodes }}}
+
+  # Loop over rule nodes {{{
+  my $RuleCounter = 0;
+  for my $RuleNode ( @RuleNodes )
+  {
+    # Handle rules {{{
+    $RuleCounter++;
+    my $RuleId    = $RuleNode->getAttribute( "id" ) || "";
+    my $Regex     = $RuleNode->findvalue( "regex" ) || "";
+    my $Replace   = $RuleNode->findvalue( "replace" ) || "";
+    if( ! $RuleId )
+    {
+      $Logger->fatal( qq{Rule definition #$RuleCounter has no name.} );
+      exit( 2 );
+    }
+    if( ! $Regex )
+    {
+      $Logger->fatal( qq{Rule $RuleId has no regex.} );
+      exit( 2 );
+    }
+    if( ! $Replace )
+    {
+      $Logger->fatal( qq{Rule $RuleId has no replace.} );
+      exit( 2 );
+    }
+    if( $Rules->{$RuleId} )
+    {
+      $Logger->fatal( qq{Rule $RuleId defined twice.} );
+      exit( 2 );
+    }
+    # Handle rules }}}
+
+    $Rules->{$RuleId}->{Regex} = eval $Regex;
+    $Rules->{$RuleId}->{Replace} = $Replace;
+  }
+  # Loop over rule nodes }}}
+
+  # Read rules definition }}}
+
+  # Read fields definition {{{
+
+  # Search for all field nodes {{{
+  my @FieldNodes = $Dom->findnodes( "/config/fields/field" );
+  my $FieldNodes = scalar( @FieldNodes );
+  $Logger->trace( qq{Found $FieldNodes field definition(s)} );
+  if( $FieldNodes <= 0 )
+  {
+    $Logger->fatal( qq{No nodes matching /config/fields/field found.} );
+    exit( 2 );
+  }
+  # Search for all field nodes }}}
+
+  # Loop over field nodes {{{
+  my $FieldCounter = 0;
+  for my $FieldNode ( @FieldNodes )
+  {
+    # Initialize field handling {{{
+    $FieldCounter++;
+    my $FieldName = $FieldNode->getAttribute( "name" ) || "";
+    if( ! $FieldName )
+    {
+      $Logger->fatal( qq{Field definition #$FieldCounter has no name.} );
+      exit( 2 );
+    }
+    if( $Fields->{$FieldName} )
+    {
+      $Logger->fatal( qq{Field $FieldName defined twice.} );
+      exit( 2 );
+    }
+    # Initialize field handling }}}
+
+    # Search for rules {{{
+    my @RuleNodes = $FieldNode->findnodes( "rule" );
+    my $RuleNodes = scalar( @RuleNodes );
+    $Logger->trace( qq{Found $RuleNodes rule definition(s)} );
+    if( $RuleNodes <= 0 )
+    {
+      $Logger->fatal( qq{No rules for field $FieldName found.} );
+      exit( 2 );
+    }
+    # Search for rules }}}
+
+    # Loop over rules {{{
+    my $RuleCounter = 0;
+    my @Rules = ();
+    for my $RuleNode ( @RuleNodes )
+    {
+      $RuleCounter++;
+      my $RuleId = $RuleNode->getAttribute( "id" ) || "";
+      if( ! $RuleId )
+      {
+        $Logger->fatal( qq{Rule definition #$RuleCounter has no id.} );
+        exit( 2 );
+      }
+      if( grep{ /^$RuleId$/ } @Rules )
+      {
+        $Logger->fatal( qq{Rule $RuleId of field $FieldName applied twice.} );
+        exit( 2 );
+      }
+      if( ! $Rules->{$RuleId} )
+      {
+        $Logger->fatal( qq{Rule $RuleId not found in rule definition.} );
+        exit( 2 );
+      }
+
+      push( @Rules , $RuleId );
+    }
+    # Loop over rules }}}
+
+    $Fields->{$FieldName} = [@Rules];
+  }
+  # Loop over field nodes }}}
+
+  # Read fields definition }}}
+
+  ( $Fields , $Rules );
+}
+# parseXml }}}
 
 __END__
 
@@ -146,9 +437,12 @@ zwf-replace - Parses 3-byte files and applies replacement operations
 zwf-replace [options] XF [XF ...]
  
  Options:
+   -config <file>     config file
    -field <name>      field name
    -help              brief help message
+   -input <file>      input file
    -man               full documentation
+   -output <file>     output file
    -search <pattern>  search pattern
    -replace <string>  replacement string
    -version           print version and exit
@@ -157,9 +451,13 @@ zwf-replace [options] XF [XF ...]
  
 =over 4
  
+=item B<-config file>
+ 
+The name of the configuration file. Required if no field name is given.
+ 
 =item B<-field name>
  
-The name of the field in which replacement occurs. Required.
+The name of the field in which replacement occurs. Required if no config file is given.
  
 =item B<-help>
  
@@ -195,6 +493,45 @@ to the contents of the fields.
 
 The field on which the search/replacement should be applied has to be given on command line.
 The search pattern must be given as well otherwise the program will terminate with an error.
+
+As an alternative a configuration file defining the rules and the fields to which it will
+be applied can be defined. This is the preferred way because it it allows to apply
+regexes for repleacement, multiple rules per field and multiple fields to be
+changed in a single scan of the input file.
+
+A sample configuration file looks like:
+
+  <config>
+    <rules>
+      <rule id="r1">
+        <regex><![CDATA[qr/=/i]]></regex>
+        <replace><![CDATA[__E_Q_U_A_L__]]></replace>
+      </rule>
+      <rule id="r2">
+        <regex><![CDATA[qr/__E_Q_U_A_L__/i]]></regex>
+        <replace><![CDATA[=]]></replace>
+      </rule>
+      <rule id="r3">
+        <regex><![CDATA[qr/:/i]]></regex>
+        <replace><![CDATA[__C_O_L_O_N__]]></replace>
+      </rule>
+      <rule id="r4">
+        <regex><![CDATA[qr/__C_O_L_O_N__/i]]></regex>
+        <replace><![CDATA[:]]></replace>
+      </rule>
+    </rules>
+    <fields>
+      <field name="PRG">
+        <rule id="r1"/>
+        <rule id="r3"/>
+      </field>
+    </fields>
+  </config>
+
+This defines that the content of all C<PRG> fields will be changed by applying
+rule C<r1> and C<r3> in that order. The rule search for any equal sign character
+C<=> and replace them with the String C<__E_Q_U_A_L__>. Similar for the
+character C<:>.
 
 On program termination some statisics will be dumped to STDERR.
 

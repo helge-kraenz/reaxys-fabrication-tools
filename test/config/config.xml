@@ -1,0 +1,25 @@
+<config>
+  <rules>
+    <rule id="r1">
+      <regex><![CDATA[qr/2022/i]]></regex>
+      <replace><![CDATA[1999]]></replace>
+    </rule>
+    <rule id="r2">
+      <regex><![CDATA[qr/Korea/]]></regex>
+      <replace><![CDATA[Pole or $1]]></replace>
+    </rule>
+    <rule id="r3">
+      <regex><![CDATA[qr/United/]]></regex>
+      <replace><![CDATA[Vereinigt(es)]]></replace>
+    </rule>
+  </rules>
+  <fields>
+    <field name="R1N">
+      <rule id="r1"/>
+    </field>
+    <field name="CJD">
+      <rule id="r2"/>
+      <rule id="r3"/>
+    </field>
+  </fields>
+</config>

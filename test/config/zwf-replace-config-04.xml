@@ -1,0 +1,16 @@
+<config>
+  <rules>
+    <rule id="r1">
+      <regex><![CDATA[qr{North}g]]></regex>
+      <replace><![CDATA[South]]></replace>
+    </rule>
+  </rules>
+  <fields>
+    <field name="f1">
+      <rule id="r1"/>
+    </field>
+    <field name="f1">
+      <rule id="r1"/>
+    </field>
+  </fields>
+</config>

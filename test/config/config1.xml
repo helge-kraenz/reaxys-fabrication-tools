@@ -1,0 +1,35 @@
+<config>
+  <rules>
+    <rule id="r1">
+      <regex><![CDATA[qr/=/i]]></regex>
+      <replace><![CDATA[__E_Q_U_A_L__]]></replace>
+    </rule>
+    <rule id="r2">
+      <regex><![CDATA[qr/__E_Q_U_A_L__/i]]></regex>
+      <replace><![CDATA[=]]></replace>
+    </rule>
+    <rule id="r3">
+      <regex><![CDATA[qr/:/i]]></regex>
+      <replace><![CDATA[__C_O_L_O_N__]]></replace>
+    </rule>
+    <rule id="r4">
+      <regex><![CDATA[qr/__C_O_L_O_N__/i]]></regex>
+      <replace><![CDATA[:]]></replace>
+    </rule>
+    <rule id="r5">
+      <regex><![CDATA[qr/\//i]]></regex>
+      <replace><![CDATA[__D_A_S_H__]]></replace>
+    </rule>
+    <rule id="r6">
+      <regex><![CDATA[qr/__D_A_S_H__/i]]></regex>
+      <replace><![CDATA[/]]></replace>
+    </rule>
+  </rules>
+  <fields>
+    <field name="PRG">
+      <rule id="r1"/>
+      <rule id="r3"/>
+      <rule id="r5"/>
+    </field>
+  </fields>
+</config>

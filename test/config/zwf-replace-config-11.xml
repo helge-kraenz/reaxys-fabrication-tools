@@ -1,0 +1,11 @@
+<config>
+  <rules>
+    <rule id="r1">
+      <replace><![CDATA[South]]></replace>
+    </rule>
+  </rules>
+  <fields>
+    <field>
+    </field>
+  </fields>
+</config>

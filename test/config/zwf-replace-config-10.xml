@@ -1,0 +1,11 @@
+<config>
+  <rules>
+    <rule id="r1">
+      <regex><![CDATA[qr{North}g]]></regex>
+    </rule>
+  </rules>
+  <fields>
+    <field>
+    </field>
+  </fields>
+</config>
