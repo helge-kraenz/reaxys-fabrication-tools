@@ -1,5 +1,46 @@
+<!--
+
+A general remark:
+In this configuration file two things are defined that should be separated.
+
+The first thing is the rule set defining the list of available rules. The
+rule set is not necessarily specific to a certain application and
+should be kept isolated from the fields definitions below. This will be done
+when moving the rules handling in a separate library.
+
+The second thing is the field definition. This is very specific to the
+application - here we scan 3-byte-files and apply rules on those.
+
+-->
 <config>
+  <!--
+    The definition of the rules.
+
+    Below we define 3 rules named r1, r2, r3.
+
+    The id attribute of each rule is required. The same is true
+    for both subtags, regex and replace. To be really sure
+    about the quotation both should be included in CDATA sections.
+
+    The tag regex must not be empty because without a search
+    phrase a rule doesn't make any sense. The format of the content
+    of regex tag is a PERL regular expression, see documentation
+    of qr operator on perlop manpage for details.
+
+    The tag replace, however, may be empty in which case the
+    search string will be deleted when found. Please note
+    that currently (???) we don't support replacing the content
+    with hits from the search part.
+
+    All regexes will be applied globally within the string in a
+    PERL sense meaning all occurences of the search string will be
+    replaced.
+  -->
   <rules>
+    <!--
+      The rule r1 defines a regex searching case insensitve
+      for the string 2022 and replacing it with 1999
+    -->
     <rule id="r1">
       <regex><![CDATA[qr/2022/i]]></regex>
       <replace><![CDATA[1999]]></replace>
@@ -13,6 +54,10 @@
       <replace><![CDATA[Vereinigt(es)]]></replace>
     </rule>
   </rules>
+
+<!--
+  
+-->
   <fields>
     <field name="R1N">
       <rule id="r1"/>
