@@ -47,6 +47,11 @@ sub complexTest
   my $File2 = "$Temp/fct1.in";
   my $File3 = "$Temp/fct2.in";
 
+  if( ! -s $File1 )
+  {
+    system( "gzip -kd $File1.gz" ) and die "Cannot uncompress fct file";
+  }
+
   `mkdir -p $Temp`;
 
   # Replace characters with placeholders
@@ -75,6 +80,11 @@ sub complexTest
 sub simpleTest
 {
   my $File = "in/cit.in";
+
+  if( ! -s $File )
+  {
+    system( "gzip -kd $File.gz" ) and die "Cannot uncompress cit file";
+  }
 
   # This dumps the original file and extracts R1N field and cuts off
   # after the 7th bytes. This should result in "R1N2022"
